@@ -203,14 +203,22 @@ func (s *Snapshotter) Restore(rec Affected) error {
 }
 
 // makeSnapshotDir returns a fresh per-snapshot directory under root.
-// Layout: <root>/<UTC-ISO-8601>-<sha1(path)[:12]>. Flat — no nested
-// mirroring of the original tree — so the snapshot store stays
-// inspectable with a single `ls`.
+// Layout: <root>/<UTC-ISO-8601-with-nanos>-<sha1(path)[:12]>. Flat —
+// no nested mirroring of the original tree — so the snapshot store
+// stays inspectable with a single `ls`.
+//
+// Timestamp resolution is nanoseconds (not seconds) so two snapshots
+// of the same path in the same wall-clock second do not collide
+// inside a single directory. Without nanosecond precision the second
+// snapshot's bytes would overwrite the first — losing the older
+// version that an `aish restore <path>` might want to walk back to.
+// (Adversarial finding caught by TestAdversarial_SnapshotDeterminism.)
 func (s *Snapshotter) makeSnapshotDir(origPath string) (string, error) {
 	if err := os.MkdirAll(s.root, 0o755); err != nil {
 		return "", err
 	}
-	ts := s.nowFn().UTC().Format("20060102T150405Z")
+	now := s.nowFn().UTC()
+	ts := now.Format("20060102T150405.000000000Z")
 	h := sha1.Sum([]byte(origPath))
 	name := ts + "-" + hex.EncodeToString(h[:6]) // 12-char short hash
 	dir := filepath.Join(s.root, name)
