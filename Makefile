@@ -8,10 +8,11 @@
 
 # ---- Modules in this workspace ----
 # Append modules to MODULES as they come online (each adds its own go.mod).
-MODULES := shell
+# Order chosen so module-graph dependencies test first (libs before consumers).
+MODULES := libs/proto shell plugins/cloud
 # Future additions:
-#   term plugins/cloud plugins/ollama plugins/wasm plugins/remote
-#   libs/proto libs/cache libs/history
+#   term plugins/ollama plugins/wasm plugins/remote
+#   libs/cache libs/history
 
 .DEFAULT_GOAL := help
 

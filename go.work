@@ -2,12 +2,12 @@ go 1.22
 
 use (
 	./libs/proto
+	./plugins/cloud
 	./shell
 )
 
 // Future modules join as they come online (each adds its own go.mod):
 //   ./term
-//   ./plugins/cloud
 //   ./plugins/ollama
 //   ./plugins/wasm
 //   ./plugins/remote
