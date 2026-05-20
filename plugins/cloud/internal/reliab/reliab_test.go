@@ -242,9 +242,9 @@ func TestCost_Record_EmptyModel_ReturnsError(t *testing.T) {
 
 func TestCost_Record_NegativeTokens_ReturnsError(t *testing.T) {
 	cases := []struct {
-		name              string
-		in, out           int
-		usd               float64
+		name    string
+		in, out int
+		usd     float64
 	}{
 		{"negative tokens_in", -1, 0, 0.0},
 		{"negative tokens_out", 0, -1, 0.0},

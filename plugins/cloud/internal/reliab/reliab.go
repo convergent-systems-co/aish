@@ -112,8 +112,8 @@ func WithRetries[T any](ctx context.Context, fn func(context.Context) (T, error)
 	}
 
 	var (
-		zero   T
-		result T
+		zero    T
+		result  T
 		lastErr error
 	)
 
