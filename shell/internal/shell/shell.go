@@ -47,6 +47,15 @@ func New() *Shell {
 	e := env.FromSlice(os.Environ())
 	reg := theme.NewRegistry()
 
+	// Load any previously-synced Brand-Atoms themes from the local cache
+	// so `theme list` shows them even before the user runs `theme sync`
+	// again. Silent — a missing cache directory or a broken file is
+	// non-fatal (the bundled themes are always a usable floor).
+	if home := homeDir(e); home != "" {
+		cacheDir := filepath.Join(home, ".aish", theme.CacheDirName)
+		_, _ = theme.LoadCacheDir(cacheDir, reg)
+	}
+
 	// Restore persisted active theme from ~/.aish/config.toml. Failures
 	// are silent — the default theme is always a usable fallback.
 	if home := homeDir(e); home != "" {
