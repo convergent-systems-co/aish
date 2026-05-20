@@ -41,6 +41,7 @@ type Dispatcher struct {
 	out      io.Writer
 	errOut   io.Writer
 	handlers map[string]Handler
+	ctx      context.Context
 }
 
 // NewDispatcher constructs a Dispatcher reading from in, writing
@@ -60,6 +61,20 @@ func NewDispatcher(in io.Reader, out, errOut io.Writer) *Dispatcher {
 func (d *Dispatcher) Register(method string, h Handler) *Dispatcher {
 	d.handlers[method] = h
 	return d
+}
+
+// WithContext sets the parent context used to derive per-request
+// handler contexts and to drive Run-loop cancellation. When unset, Run
+// uses context.Background(). Returns the Dispatcher for chaining.
+func (d *Dispatcher) WithContext(ctx context.Context) *Dispatcher {
+	d.ctx = ctx
+	return d
+}
+
+// Handlers returns the registered handler map. Exposed for tests; the
+// production code path is Register/Run only.
+func (d *Dispatcher) Handlers() map[string]Handler {
+	return d.handlers
 }
 
 // Run drives the dispatch loop until in returns io.EOF or an
