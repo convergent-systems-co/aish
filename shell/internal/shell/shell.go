@@ -49,7 +49,7 @@ func New() *Shell {
 
 	// Restore persisted active theme from ~/.aish/config.toml. Failures
 	// are silent — the default theme is always a usable fallback.
-	if home, _ := e.Get("HOME"); home != "" {
+	if home := homeDir(e); home != "" {
 		if active := theme.ReadActiveTheme(home); active != "" {
 			_ = reg.SetActive(active) // unknown name silently falls through to "default"
 		}
@@ -317,7 +317,7 @@ func (s *Shell) SetLastExit(code int) {
 // glyph fall back to the baseline string.
 func (s *Shell) Prompt() string {
 	display := s.cwd
-	if home, ok := s.env.Get("HOME"); ok && home != "" {
+	if home := homeDir(s.env); home != "" {
 		switch {
 		case display == home:
 			display = "~"
@@ -336,24 +336,43 @@ func (s *Shell) Themes() *theme.Registry {
 	return s.themes
 }
 
-// expandTilde returns path with a leading `~` or `~/` replaced by $HOME.
-// A bare empty string is treated as `~` (bare-cd semantics). If $HOME is
-// unset and the path needs $HOME, returns "" so the caller can surface
-// the failure.
+// expandTilde returns path with a leading `~` or `~/` replaced by the
+// user's home directory (resolved per homeDir — $HOME on POSIX,
+// $USERPROFILE on Windows). A bare empty string is treated as `~` (the
+// bare-cd semantic). If neither env var is set, returns "" so the caller
+// can surface the failure.
 func expandTilde(path string, e *env.Env) string {
 	if path == "" || path == "~" {
-		if home, ok := e.Get("HOME"); ok && home != "" {
+		if home := homeDir(e); home != "" {
 			return home
 		}
 		return ""
 	}
 	if strings.HasPrefix(path, "~/") {
-		if home, ok := e.Get("HOME"); ok && home != "" {
+		if home := homeDir(e); home != "" {
 			return filepath.Join(home, path[2:])
 		}
 		return ""
 	}
 	return path
+}
+
+// homeDir returns the user's home directory according to the shell's
+// env. On POSIX systems this is $HOME. On Windows the equivalent is
+// $USERPROFILE; we accept either (preferring $HOME when both are set)
+// so the same code path works across platforms without an explicit
+// runtime.GOOS check.
+//
+// Returns "" if neither is set — callers should treat that as "no home"
+// and surface an error rather than silently using a wrong default.
+func homeDir(e *env.Env) string {
+	if h, ok := e.Get("HOME"); ok && h != "" {
+		return h
+	}
+	if h, ok := e.Get("USERPROFILE"); ok && h != "" {
+		return h
+	}
+	return ""
 }
 
 // stripOuterQuotes removes one layer of matching single or double quotes

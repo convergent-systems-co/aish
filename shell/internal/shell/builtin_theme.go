@@ -100,9 +100,9 @@ func (s *Shell) themeSetCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	// Persist. Failures here don't undo the in-process activation; they
 	// just mean the next aish invocation won't remember the choice.
-	home, _ := s.env.Get("HOME")
+	home := homeDir(s.env)
 	if home == "" {
-		fmt.Fprintln(stderr, "aish: theme set: $HOME unset; theme active for this session only")
+		fmt.Fprintln(stderr, "aish: theme set: $HOME / $USERPROFILE unset; theme active for this session only")
 		return 2
 	}
 	if err := theme.WriteActiveTheme(home, name); err != nil {

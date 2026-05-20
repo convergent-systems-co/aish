@@ -13,7 +13,7 @@ BUILD_TIME  := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS     := -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 
 DIST        := dist
-PLATFORMS   := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
+PLATFORMS   := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
 
 GO          ?= go
 GOFLAGS     ?=
@@ -28,11 +28,13 @@ build: ## Build aish for the host platform into shell/dist/aish
 	@echo "→ shell/$(DIST)/$(BINARY) ($(VERSION))"
 
 .PHONY: build-all
-build-all: ## Cross-compile aish for darwin/linux × amd64/arm64
+build-all: ## Cross-compile aish for darwin/linux/windows × amd64/arm64
 	@mkdir -p $(DIST)
 	@for p in $(PLATFORMS); do \
 		os=$${p%/*}; arch=$${p#*/}; \
-		out=$(DIST)/$(BINARY)-$$os-$$arch; \
+		ext=""; \
+		if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
+		out=$(DIST)/$(BINARY)-$$os-$$arch$$ext; \
 		echo "→ shell/$$out"; \
 		GOOS=$$os GOARCH=$$arch $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $$out $(CMD) || exit 1; \
 	done
