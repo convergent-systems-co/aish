@@ -151,26 +151,16 @@ func pumpSSE(ctx context.Context, body io.ReadCloser, requestModel string, out c
 	}
 
 	// If we fell out of the loop without seeing message_stop, the
-	// upstream stream closed early. Emit a terminal Complete frame so
-	// the consumer is not blocked waiting. Confidence stays 1.0; the
-	// invocation reflects whatever we assembled.
+	// upstream stream closed early. Callers MUST always observe a
+	// terminal frame, so we synthesize one. Confidence is 0.0 to
+	// signal "stream did not close cleanly," and Cost is omitted —
+	// we never saw a final usage block to populate it from.
 	if err := scanner.Err(); err == nil || err == io.EOF {
-		invocation := assembled.String()
-		if invocation == "" {
-			return
-		}
-		cost := &proto.Cost{
-			Model:     model,
-			TokensIn:  tokensIn,
-			TokensOut: tokensOut,
-			USD:       estimateUSD(model, tokensIn, tokensOut),
-		}
 		select {
 		case out <- proto.Frame{
 			Type:       proto.KindComplete,
-			Invocation: invocation,
-			Confidence: 1.0,
-			Cost:       cost,
+			Invocation: assembled.String(),
+			Confidence: 0.0,
 		}:
 		case <-ctx.Done():
 		}
