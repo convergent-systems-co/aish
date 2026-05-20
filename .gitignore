@@ -49,3 +49,6 @@ logs/
 # Build outputs
 dist/
 coverage.out
+
+# Test-run reports (per-machine, per-run; runners produce them on demand)
+aish-windows-*-report.txt
