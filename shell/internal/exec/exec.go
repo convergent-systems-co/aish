@@ -13,7 +13,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/convergent-systems-co/aish/internal/parser"
+	"github.com/convergent-systems-co/aish/shell/internal/parser"
 )
 
 // Run executes pipeline against the host. env is passed through to every

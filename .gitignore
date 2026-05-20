@@ -42,3 +42,6 @@ logs/
 
 # AI tooling state (checkpoints, transient logs)
 .ai/
+
+# /spawn manifests — restartable state per machine, not source
+.artifacts/**/*-manifest.json

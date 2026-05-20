@@ -1,0 +1,13 @@
+go 1.22
+
+use ./shell
+
+// Future modules join as they come online (each adds its own go.mod):
+//   use ./term
+//   use ./plugins/cloud
+//   use ./plugins/ollama
+//   use ./plugins/wasm
+//   use ./plugins/remote
+//   use ./libs/proto
+//   use ./libs/cache
+//   use ./libs/history
