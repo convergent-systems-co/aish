@@ -4,7 +4,6 @@
 package shell
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -77,7 +76,6 @@ func New() *Shell {
 //
 // Returns nil on clean EOF, non-nil on unrecoverable stdin I/O failures.
 func (s *Shell) Run(stdin io.Reader, stdout, stderr io.Writer) error {
-	reader := bufio.NewReader(stdin)
 	for {
 		// Render the prompt before each read so an interactive user sees it.
 		// Errors writing the prompt are non-fatal — a piped stdin/stdout
@@ -87,10 +85,10 @@ func (s *Shell) Run(stdin io.Reader, stdout, stderr io.Writer) error {
 			return fmt.Errorf("write prompt: %w", err)
 		}
 
-		line, readErr := reader.ReadString('\n')
-		// Process whatever content arrived before the error, then act on
-		// the error itself — this is the bufio idiom for "handle the last
-		// unterminated line on EOF".
+		// readLine reads one byte at a time so we never prefetch bytes that
+		// a child process (`cat`, `head`, …) is supposed to consume. See
+		// issue #167.
+		line, readErr := readLine(stdin)
 		trimmed := strings.TrimRight(line, "\r\n")
 		if trimmed != "" {
 			if dispatchErr := s.dispatch(trimmed, stdin, stdout, stderr); dispatchErr != nil {
@@ -108,9 +106,42 @@ func (s *Shell) Run(stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 }
 
+// readLine reads from r byte-by-byte until it sees `\n` or hits EOF. The
+// returned line INCLUDES the trailing `\n` (if any). The caller is
+// responsible for trimming.
+//
+// Byte-by-byte reads are intentional: any buffered prefetch would steal
+// bytes that external children (`cat`, `head`, `read`) need to consume.
+// See issue #167 for the regression we're avoiding.
+//
+// The performance cost is one syscall per typed character. At shell-input
+// rates that's invisible; even for scripted input piped through a 1 MB
+// stdin, the OS-level pipe buffer makes each Read effectively a memcpy.
+func readLine(r io.Reader) (string, error) {
+	var b strings.Builder
+	var buf [1]byte
+	for {
+		n, err := r.Read(buf[:])
+		if n > 0 {
+			b.WriteByte(buf[0])
+			if buf[0] == '\n' {
+				return b.String(), nil
+			}
+		}
+		if err != nil {
+			return b.String(), err
+		}
+	}
+}
+
 // dispatch routes a single (newline-stripped, non-empty) input line to
 // the built-in or external-command path. It captures the exit code on
 // the Shell so subsequent `$?` expansions see it.
+//
+// stdin is passed straight through to external children. Because Run
+// reads input byte-by-byte (no bufio prefetch), the bytes following the
+// current line are still available on stdin for the child to consume
+// (e.g. `cat` reading subsequent lines). See issue #167.
 //
 // Returns a non-nil error only when the caller's stdout/stderr cannot be
 // written — those are unrecoverable for the REPL. A failing built-in or
@@ -185,6 +216,11 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 	// exec.Run inherits the shell's env and cwd. The cwd is propagated by
 	// chdir-ing the parent before Start; v0.1-1 keeps it simple by relying
 	// on the process-wide cwd, which Cd has already set via os.Chdir.
+	//
+	// stdin is the same Reader the REPL is reading lines from. Because
+	// Run uses byte-by-byte reads (no prefetch), unread bytes are still
+	// pending on the underlying stream — external children like `cat`
+	// see them as their own input. See issue #167.
 	exitCode, runErr := exec.Run(
 		context.Background(),
 		pipeline,
