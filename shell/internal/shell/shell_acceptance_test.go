@@ -121,7 +121,15 @@ func TestSetLastExitRoundTrip(t *testing.T) {
 
 // TestPromptShape verifies the v0.1-1 prompt format: "<cwd-shortened> > "
 // with ~ substituting for $HOME prefix. Gates #11.
+//
+// Isolation note: shell.New() reads ~/.aish/config.toml from $HOME to
+// restore the persisted active theme. Without isolation the developer's
+// real `theme set` (e.g. nord-powerline with `❯` glyph) leaks into
+// the test, breaking the " > " suffix assertion. t.Setenv points $HOME
+// at a tempdir (with no config.toml) so New() falls through to the
+// "default" theme whose prompt_char IS ">".
 func TestPromptShape(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	s := New()
 	if err := s.Cd(dir); err != nil {
