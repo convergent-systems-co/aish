@@ -1,9 +1,12 @@
 package shell
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/convergent-systems-co/aish/shell/internal/theme"
 )
@@ -36,6 +39,8 @@ func (s *Shell) themeBuiltin(args []string, stdout, stderr io.Writer) int {
 		return s.themeSetCmd(args[1:], stdout, stderr)
 	case "preview":
 		return s.themePreviewCmd(args[1:], stdout, stderr)
+	case "sync":
+		return s.themeSyncCmd(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		fmt.Fprintln(stdout, themeUsage())
 		return 0
@@ -54,6 +59,11 @@ Usage: theme <subcommand>
   show [<name>]         show details of a theme (defaults to the active one)
   set <name>            activate <name> and persist to ~/.aish/config.toml
   preview <name>        render a sample prompt with <name> without activating
+  sync [<id>...]        fetch theme bundles from the Brand-Atoms registry
+                        (default https://theme-atoms.com; override with
+                        $AISH_BRAND_REGISTRY). With no args, fetches the
+                        full catalog; otherwise fetches only the named IDs.
+                        Cached at ~/.aish/themes/cache/<id>.toml.
 `)
 }
 
@@ -110,6 +120,49 @@ func (s *Shell) themeSetCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	fmt.Fprintf(stdout, "theme: active = %s\n", name)
+	return 0
+}
+
+func (s *Shell) themeSyncCmd(args []string, stdout, stderr io.Writer) int {
+	url, _ := s.env.Get("AISH_BRAND_REGISTRY")
+	c := theme.NewClient(url, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	fmt.Fprintf(stdout, "syncing from %s ...\n", c.BaseURL())
+	res, err := c.Sync(ctx, s.env.Environ(), s.themes, theme.SyncOptions{
+		Only: args,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "aish: theme sync: %v\n", err)
+		return 2
+	}
+
+	if len(res.Cached) > 0 {
+		ids := append([]string(nil), res.Cached...)
+		sort.Strings(ids)
+		fmt.Fprintf(stdout, "cached: %s\n", strings.Join(ids, ", "))
+	}
+	if len(res.Registered) > 0 {
+		ids := append([]string(nil), res.Registered...)
+		sort.Strings(ids)
+		fmt.Fprintf(stdout, "registered: %s\n", strings.Join(ids, ", "))
+	}
+	if len(res.Errors) > 0 {
+		// Sort for stable output.
+		ids := make([]string, 0, len(res.Errors))
+		for k := range res.Errors {
+			ids = append(ids, k)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			fmt.Fprintf(stderr, "  %s: %v\n", id, res.Errors[id])
+		}
+		if len(res.Cached) == 0 {
+			return 1
+		}
+	}
 	return 0
 }
 
