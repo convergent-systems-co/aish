@@ -57,7 +57,12 @@ func TestMain(m *testing.M) {
 	}
 	binaryPath = filepath.Join(tmpDir, binaryName)
 
-	build := exec.Command("go", "build", "-o", binaryPath, cmdImport)
+	// -buildvcs=false: when this checkout is a git worktree (or any
+	// non-canonical .git location), `go build` would otherwise fail with
+	// "error obtaining VCS status". The integration test binary's
+	// embedded version stamp is not load-bearing for behaviour, so we
+	// skip VCS stamping unconditionally here.
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", binaryPath, cmdImport)
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "integration: go build failed:\n%s\n", out)
 		os.Exit(1)

@@ -103,7 +103,7 @@ func TestCacheBuiltin_ClearTruncates(t *testing.T) {
 	s := New()
 	defer s.Close()
 	// Pre-populate with a row so Clear has something to truncate.
-	if err := s.cacheStore.Write("ls all files", runtime.GOOS, "ls -la", 0.9); err != nil {
+	if err := s.cacheStore.Write("ls all files", runtime.GOOS, "ls -la", 0.9, nil); err != nil {
 		t.Fatalf("seed write: %v", err)
 	}
 
@@ -160,7 +160,7 @@ func TestDispatch_KnownBinary_TakesPassthrough(t *testing.T) {
 	defer s.Close()
 
 	// Seed a poison row so that if the cache fired, exit would be 7.
-	if err := s.cacheStore.Write("true", runtime.GOOS, "false", 1.0); err != nil {
+	if err := s.cacheStore.Write("true", runtime.GOOS, "false", 1.0, nil); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -191,7 +191,7 @@ func TestDispatch_CacheHit_RunsCachedInvocation(t *testing.T) {
 	// "say" all resolve on at least one of the supported OSes.
 	const intent = "wibble-fake-intent hello to the cache"
 	const invocation = "echo cache-hit-OK"
-	if err := s.cacheStore.Write(intent, runtime.GOOS, invocation, 1.0); err != nil {
+	if err := s.cacheStore.Write(intent, runtime.GOOS, invocation, 1.0, nil); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 

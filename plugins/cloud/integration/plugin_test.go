@@ -1,7 +1,9 @@
 package integration
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -235,12 +237,13 @@ func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer srv.Close()
 
-	// MethodEmbed is in the proto contract but not registered by the
-	// cloud plugin (the plan explicitly defers embed to a later epic).
+	// Use a method name the plugin does not register. (MethodEmbed
+	// previously played this role, but it's now wired in by v0.1-2-followup;
+	// see TestEmbedMethodReturnsVector below.)
 	stdin := marshalRequest(t, proto.Request{
 		JSONRPC: proto.Version,
-		ID:      "embed-1",
-		Method:  proto.MethodEmbed,
+		ID:      "unknown-1",
+		Method:  "no-such-method-do-not-implement",
 	})
 
 	s := run(t, runOpts{
@@ -261,8 +264,81 @@ func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 	if r.Error.Code != proto.CodeMethodNotFound {
 		t.Errorf("Error.Code=%d, want %d (CodeMethodNotFound)", r.Error.Code, proto.CodeMethodNotFound)
 	}
-	if r.ID != "embed-1" {
-		t.Errorf("response.ID=%q, want %q", r.ID, "embed-1")
+	if r.ID != "unknown-1" {
+		t.Errorf("response.ID=%q, want %q", r.ID, "unknown-1")
+	}
+}
+
+// TestEmbedMethodReturnsVector exercises MethodEmbed end-to-end through
+// the plugin: stub the gateway's /embeddings endpoint, send a JSON-RPC
+// embed request via the plugin's stdin, and assert the plugin emits one
+// Embedding frame carrying the vector + cost telemetry.
+func TestEmbedMethodReturnsVector(t *testing.T) {
+	wantVector := []float64{0.1, -0.2, 0.3, 0.4, 0.5}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/embeddings") {
+			t.Errorf("unexpected path %q; want suffix /embeddings", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data":  []map[string]any{{"embedding": wantVector, "index": 0}},
+			"model": "voyage-3",
+			"usage": map[string]any{"prompt_tokens": 4, "total_tokens": 4},
+		})
+	}))
+	defer srv.Close()
+
+	stdin := marshalRequest(t, proto.Request{
+		JSONRPC: proto.Version,
+		ID:      "embed-e2e-1",
+		Method:  proto.MethodEmbed,
+		Params: proto.InferParams{
+			Intent: "list files",
+			Model:  "voyage-3",
+		},
+	})
+
+	s := run(t, runOpts{
+		stdin: stdin,
+		env:   envWithKey(),
+		args:  []string{"--api-url", srv.URL},
+	})
+	s.assertExit(0)
+
+	resps := readResponses(t, s.stdout)
+	if len(resps) != 1 {
+		t.Fatalf("want 1 response, got %d: %+v", len(resps), resps)
+	}
+	r := resps[0]
+	if r.Error != nil {
+		t.Fatalf("unexpected Error=%+v", r.Error)
+	}
+	if r.Result == nil {
+		t.Fatalf("expected Result, got nil")
+	}
+	if r.Result.Type != proto.KindEmbedding {
+		t.Errorf("Result.Type=%q, want %q", r.Result.Type, proto.KindEmbedding)
+	}
+	if len(r.Result.Vector) != len(wantVector) {
+		t.Fatalf("Vector len=%d, want %d", len(r.Result.Vector), len(wantVector))
+	}
+	// Tolerance compare — float64 JSON values narrowed to float32 by the
+	// anthropic client introduce ~1e-7 representation noise.
+	const tol = 1e-6
+	for i, v := range wantVector {
+		if d := math.Abs(float64(r.Result.Vector[i]) - v); d > tol {
+			t.Errorf("Vector[%d]=%v, want %v (delta %v > %v)", i, r.Result.Vector[i], v, d, tol)
+		}
+	}
+	if r.Result.Cost == nil {
+		t.Fatal("Cost is nil; want populated")
+	}
+	if r.Result.Cost.Model == "" {
+		t.Errorf("Cost.Model empty; want a model id distinct from the infer model")
+	}
+	if r.ID != "embed-e2e-1" {
+		t.Errorf("response.ID=%q, want %q", r.ID, "embed-e2e-1")
 	}
 }
 

@@ -39,7 +39,7 @@ func TestResolveCacheHitSkipsPlugin(t *testing.T) {
 	c := newCacheWithStub(t)
 	// Pre-populate the cache so Resolve takes the hit path. Then close
 	// the plugin to prove we never called it on the hit.
-	if err := c.store.Write("list files", "darwin", "ls -la", 1.0); err != nil {
+	if err := c.store.Write("list files", "darwin", "ls -la", 1.0, nil); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if err := c.plugin.Close(); err != nil {

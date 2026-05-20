@@ -28,41 +28,88 @@ var ErrNoPlugin = errors.New("cache: no inference plugin configured")
 // lifecycle boundary explicit and lets tests inject nil for cache-only
 // behaviour.
 type Cache struct {
-	store  *Store
-	plugin *PluginClient
+	store               *Store
+	plugin              *PluginClient
+	similarityThreshold float64
 }
 
 // New wires a Store and optional PluginClient together. The Store is
 // required; passing nil here is a programmer error and panics at
 // Resolve time rather than returning a less helpful error.
+//
+// The similarity threshold defaults to DefaultSimilarityThreshold;
+// override with WithSimilarityThreshold.
 func New(store *Store, plugin *PluginClient) *Cache {
-	return &Cache{store: store, plugin: plugin}
+	return &Cache{
+		store:               store,
+		plugin:              plugin,
+		similarityThreshold: DefaultSimilarityThreshold,
+	}
+}
+
+// WithSimilarityThreshold sets the cosine-similarity floor at or above
+// which a LookupNearest match is treated as a cache hit. Returns the
+// Cache for chaining. Values outside [0, 1] are clamped — a negative
+// threshold would let anti-aligned vectors masquerade as matches, and
+// a threshold > 1 would suppress every possible match.
+func (c *Cache) WithSimilarityThreshold(t float64) *Cache {
+	if c == nil {
+		return nil
+	}
+	if t < 0 {
+		t = 0
+	} else if t > 1 {
+		t = 1
+	}
+	c.similarityThreshold = t
+	return c
+}
+
+// SimilarityThreshold returns the current threshold. Exposed mainly for
+// tests and diagnostic output (`aish cache stats` in a future revision
+// may print it).
+func (c *Cache) SimilarityThreshold() float64 {
+	if c == nil {
+		return 0
+	}
+	return c.similarityThreshold
 }
 
 // Resolve compiles `intent` for `os` to a shell-ready invocation,
 // preferring the local cache before falling back to the inference
 // plugin.
 //
-// Three return shapes:
+// Lookup order:
 //
-//	(invocation, true,  nil) — cache hit; no plugin call was made.
-//	(invocation, false, nil) — cache miss; plugin produced the result
-//	                            and it was written back for next time.
+//  1. Exact-hash Lookup (the v0.1-2 cache L1 path; counters bump here).
+//  2. If miss and the plugin supports embeddings:
+//     a. Plugin.Embed(intent) → query vector.
+//     b. Store.LookupNearest(vector, threshold, os) → similarity hit.
+//     c. On similarity hit, write the freshly-embedded intent back
+//     under its own exact-hash key (with the matched row's
+//     invocation) so the next call lands on the exact-hash path
+//     in tier (1) above.
+//  3. Plugin.Infer for genuinely novel intents; write back with the
+//     freshly-generated embedding so the next call benefits.
+//
+// Three return shapes (unchanged from the v0.1-2 contract):
+//
+//	(invocation, true,  nil) — cache hit (exact or similarity).
+//	(invocation, false, nil) — plugin produced the result and it was
+//	                            written back for next time.
 //	("",         false, err) — cache miss with no plugin (err =
 //	                            ErrNoPlugin), or the plugin failed.
 //
-// The write-back after a successful plugin call uses confidence as
-// returned by the plugin. A write-back failure is logged via the
-// returned error path — we still hand the invocation back to the
-// caller, but the next call for the same intent will miss again.
-// Actually, on second thought: a write-back failure indicates a bigger
-// problem (DB closed, disk full) and we surface it; callers that want
-// to ignore write-back faults can branch on errors.Is.
+// On embedding-pipeline failure (Embed call errors, LookupNearest
+// errors), Resolve degrades gracefully to the plain Infer path — the
+// cache should never be worse than v0.1-2's behavior even when the
+// similarity branch malfunctions.
 func (c *Cache) Resolve(ctx context.Context, intent, os string) (string, bool, error) {
 	if c == nil || c.store == nil {
 		return "", false, errors.New("cache: Resolve: nil store")
 	}
 
+	// Tier 1 — exact-hash cache hit takes priority. Same path as v0.1-2.
 	invocation, hit, err := c.store.Lookup(intent, os)
 	if err != nil {
 		return "", false, fmt.Errorf("cache: Resolve: lookup: %w", err)
@@ -75,17 +122,38 @@ func (c *Cache) Resolve(ctx context.Context, intent, os string) (string, bool, e
 		return "", false, ErrNoPlugin
 	}
 
+	// Tier 2 — embedding similarity. Best-effort: any failure here
+	// (Embed errors, LookupNearest errors) falls through to Infer
+	// rather than failing the whole Resolve. We capture the query
+	// vector here so it can be persisted with the freshly-inferred
+	// invocation in tier 3 — saves a second Embed call.
+	queryVector, embErr := c.plugin.Embed(ctx, intent)
+	if embErr == nil && len(queryVector) > 0 {
+		_, simInvocation, _, simHit, simErr := c.store.LookupNearest(queryVector, c.similarityThreshold, os)
+		if simErr == nil && simHit {
+			// Promote the similarity hit to an exact-hash hit for next
+			// time by writing the queried intent under its own hash key
+			// with the matched invocation + the freshly-issued
+			// embedding. Confidence carries through from the matched
+			// row at 1.0 — the similarity match itself is the
+			// confidence signal here.
+			if werr := c.store.Write(intent, os, simInvocation, 1.0, queryVector); werr != nil {
+				return "", false, fmt.Errorf("cache: Resolve: similarity write-back: %w", werr)
+			}
+			return simInvocation, true, nil
+		}
+	}
+
+	// Tier 3 — Infer for genuinely novel intents.
 	invocation, confidence, err := c.plugin.Infer(ctx, intent, os)
 	if err != nil {
 		return "", false, fmt.Errorf("cache: Resolve: infer: %w", err)
 	}
 
-	// Write-back. A failure here is unusual (SQLite is local) but real;
-	// surface it so the user knows the cache is unhealthy. The
-	// invocation itself is still valid — callers that want it anyway
-	// can `errors.Is(err, somethingSpecific)` in the future. For now
-	// we treat write-back failure as a hard error.
-	if err := c.store.Write(intent, os, invocation, confidence); err != nil {
+	// Write-back. Use the previously-captured queryVector if we have
+	// one, so the next call lands on either the exact-hash path or
+	// the similarity branch.
+	if err := c.store.Write(intent, os, invocation, confidence, queryVector); err != nil {
 		return "", false, fmt.Errorf("cache: Resolve: write-back: %w", err)
 	}
 	return invocation, false, nil

@@ -53,7 +53,7 @@ func TestLookupMissThenHit(t *testing.T) {
 		t.Fatalf("post-miss stats = %+v, want misses=1 hits=0 total=1", got)
 	}
 
-	if err := store.Write(intent, os, invoc, 0.9); err != nil {
+	if err := store.Write(intent, os, invoc, 0.9, nil); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
@@ -79,7 +79,7 @@ func TestWriteUpserts(t *testing.T) {
 		os     = "linux"
 	)
 
-	if err := store.Write(intent, os, "rm -f /var/log/*.log", 0.7); err != nil {
+	if err := store.Write(intent, os, "rm -f /var/log/*.log", 0.7, nil); err != nil {
 		t.Fatalf("first Write: %v", err)
 	}
 	// Hit once so hit_count is non-zero.
@@ -88,7 +88,7 @@ func TestWriteUpserts(t *testing.T) {
 	}
 
 	// Second Write replaces invocation + confidence.
-	if err := store.Write(intent, os, "find /var/log -name '*.log' -delete", 0.95); err != nil {
+	if err := store.Write(intent, os, "find /var/log -name '*.log' -delete", 0.95, nil); err != nil {
 		t.Fatalf("second Write: %v", err)
 	}
 	got, hit, err := store.Lookup(intent, os)
@@ -124,7 +124,7 @@ func TestPerOSIsolation(t *testing.T) {
 		{"windows", "Remove-Item -Recurse -Force"},
 	}
 	for _, tc := range cases {
-		if err := store.Write(intent, tc.os, tc.invoc, 1.0); err != nil {
+		if err := store.Write(intent, tc.os, tc.invoc, 1.0, nil); err != nil {
 			t.Fatalf("Write(%s): %v", tc.os, err)
 		}
 	}
@@ -158,7 +158,7 @@ func TestStatsCountersRoundTrip(t *testing.T) {
 	}
 	// Populate two of them and hit them twice each.
 	for _, i := range []string{"a", "b"} {
-		if err := store.Write(i, os, "echo "+i, 1.0); err != nil {
+		if err := store.Write(i, os, "echo "+i, 1.0, nil); err != nil {
 			t.Fatalf("Write(%q): %v", i, err)
 		}
 		for j := 0; j < 2; j++ {
@@ -186,7 +186,7 @@ func TestStatsCountersRoundTrip(t *testing.T) {
 func TestClearTruncates(t *testing.T) {
 	store := openTemp(t)
 	for _, i := range []string{"x", "y", "z"} {
-		if err := store.Write(i, "darwin", "echo "+i, 1.0); err != nil {
+		if err := store.Write(i, "darwin", "echo "+i, 1.0, nil); err != nil {
 			t.Fatalf("Write(%q): %v", i, err)
 		}
 		// One lookup each to push counters above zero.
@@ -212,7 +212,7 @@ func TestClearTruncates(t *testing.T) {
 
 func TestNormalizationCollapsesCosmeticDifferences(t *testing.T) {
 	store := openTemp(t)
-	if err := store.Write("List Files", "darwin", "ls -la", 1.0); err != nil {
+	if err := store.Write("List Files", "darwin", "ls -la", 1.0, nil); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	// Trailing space + uppercase + leading space should all hit.
@@ -231,10 +231,10 @@ func TestConfidenceClampedToUnit(t *testing.T) {
 	store := openTemp(t)
 	// Negative and >1 confidences are clamped silently. We verify by
 	// peeking at the column directly; the public API doesn't expose it.
-	if err := store.Write("a", "darwin", "echo a", -0.5); err != nil {
+	if err := store.Write("a", "darwin", "echo a", -0.5, nil); err != nil {
 		t.Fatalf("Write -0.5: %v", err)
 	}
-	if err := store.Write("b", "darwin", "echo b", 1.5); err != nil {
+	if err := store.Write("b", "darwin", "echo b", 1.5, nil); err != nil {
 		t.Fatalf("Write 1.5: %v", err)
 	}
 	var confA, confB float64
@@ -263,7 +263,7 @@ func TestWriteValidatesInputs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := store.Write(tc.intent, tc.os, tc.invoc, 1.0); err == nil {
+			if err := store.Write(tc.intent, tc.os, tc.invoc, 1.0, nil); err == nil {
 				t.Error("expected error, got nil")
 			}
 		})

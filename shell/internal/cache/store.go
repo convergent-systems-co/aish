@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	// modernc.org/sqlite is a pure-Go SQLite driver (no CGO). It
@@ -125,16 +126,23 @@ func (s *Store) Lookup(intent, os string) (string, bool, error) {
 }
 
 // Write upserts an (intent, os) row. Idempotent: a second Write for the
-// same key replaces invocation + confidence and leaves hit_count and
-// created_at intact (so we don't lose the original learn date or reset
-// frequency on a re-fetch). last_used is bumped to mark recent activity.
+// same key replaces invocation + confidence + embedding and leaves
+// hit_count and created_at intact (so we don't lose the original learn
+// date or reset frequency on a re-fetch). last_used is bumped to mark
+// recent activity.
 //
 // confidence is clamped to [0, 1] defensively — a plugin that returns
 // 1.5 or -0.1 is buggy but should not corrupt the schema.
 //
+// embedding, when non-nil and non-empty, is encoded as little-endian
+// float32 bytes into the `embedding BLOB` column. nil or empty leaves
+// the column NULL (and on upsert, clears any prior embedding — callers
+// that want to preserve an existing embedding while updating other
+// fields should round-trip-read first).
+//
 // Write does NOT touch stats; counters are owned by Lookup (see its
 // docstring for the why).
-func (s *Store) Write(intent, os, invocation string, confidence float64) error {
+func (s *Store) Write(intent, os, invocation string, confidence float64, embedding []float32) error {
 	if s == nil || s.db == nil {
 		return errors.New("cache: Write: store is closed")
 	}
@@ -153,19 +161,104 @@ func (s *Store) Write(intent, os, invocation string, confidence float64) error {
 		confidence = 1
 	}
 	h := hashIntent(intent)
+	var embBlob []byte
+	if len(embedding) > 0 {
+		embBlob = encodeEmbedding(embedding)
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO intents (intent_hash, os, intent, invocation, confidence)
-		 VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO intents (intent_hash, os, intent, invocation, confidence, embedding)
+		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(intent_hash, os) DO UPDATE SET
 		   invocation = excluded.invocation,
 		   confidence = excluded.confidence,
+		   embedding  = excluded.embedding,
 		   last_used  = CURRENT_TIMESTAMP`,
-		h, os, intent, invocation, confidence,
+		h, os, intent, invocation, confidence, embBlob,
 	)
 	if err != nil {
 		return fmt.Errorf("cache: Write: upsert: %w", err)
 	}
 	return nil
+}
+
+// LookupNearest scans the rows for the given OS and returns the single
+// highest-similarity match whose cosine similarity to `embedding` is at
+// or above `threshold`. The `os` filter preserves the per-OS isolation
+// invariant established for the exact-hash Lookup path: a query for
+// "darwin" never returns a "windows" row.
+//
+// Return shape:
+//
+//	(intent, invocation, similarity, true,  nil) — a row met threshold
+//	("",     "",         0,          false, nil) — no row met threshold,
+//	                                                or no row had an
+//	                                                embedding stored
+//	("",     "",         0,          false, err) — I/O failure
+//
+// This is a brute-force scan. At the v0.1 corpus sizes
+// (~thousands of rows) it is acceptable; a future v0.2-3 vector index
+// (sqlite-vss or similar) will replace the scan when row count grows.
+//
+// LookupNearest does NOT update hit_count or stats counters. Counters
+// are owned by Lookup (the exact-hash path), and a similarity hit
+// promotes itself to an exact-hash hit when Cache.Resolve write-back
+// stores the original (matched) intent under the freshly-issued
+// embedding. The next call for the same paraphrase will still be a
+// miss-then-similarity-hit until either (a) the canonical intent is
+// queried, or (b) we change Resolve to write the paraphrase as its own
+// row — out of scope for v0.1.
+func (s *Store) LookupNearest(embedding []float32, threshold float64, os string) (string, string, float64, bool, error) {
+	if s == nil || s.db == nil {
+		return "", "", 0, false, errors.New("cache: LookupNearest: store is closed")
+	}
+	if len(embedding) == 0 {
+		return "", "", 0, false, nil
+	}
+	if os == "" {
+		return "", "", 0, false, errors.New("cache: LookupNearest: os is empty")
+	}
+
+	rows, err := s.db.Query(
+		`SELECT intent, invocation, embedding FROM intents WHERE os = ? AND embedding IS NOT NULL`,
+		os,
+	)
+	if err != nil {
+		return "", "", 0, false, fmt.Errorf("cache: LookupNearest: query: %w", err)
+	}
+	defer rows.Close()
+
+	bestSim := math.Inf(-1)
+	var bestIntent, bestInvocation string
+	found := false
+
+	for rows.Next() {
+		var intent, invocation string
+		var embBlob []byte
+		if err := rows.Scan(&intent, &invocation, &embBlob); err != nil {
+			return "", "", 0, false, fmt.Errorf("cache: LookupNearest: scan: %w", err)
+		}
+		rowEmbedding, decErr := decodeEmbedding(embBlob)
+		if decErr != nil {
+			// A malformed BLOB shouldn't break the whole lookup — skip
+			// the row and surface a follow-up bug separately if it's
+			// reproducible (per Code.md §11.3 bug-report-separately).
+			continue
+		}
+		sim := Cosine(embedding, rowEmbedding)
+		if sim >= threshold && sim > bestSim {
+			bestSim = sim
+			bestIntent = intent
+			bestInvocation = invocation
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", "", 0, false, fmt.Errorf("cache: LookupNearest: rows: %w", err)
+	}
+	if !found {
+		return "", "", 0, false, nil
+	}
+	return bestIntent, bestInvocation, bestSim, true, nil
 }
 
 // Stats is the snapshot returned by Store.Stats. It carries cumulative

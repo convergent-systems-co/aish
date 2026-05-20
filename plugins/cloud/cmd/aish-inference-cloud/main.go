@@ -240,6 +240,18 @@ func main() {
 		return ch, nil
 	})
 
+	// --- MethodEmbed --------------------------------------------------
+	//
+	// Non-streaming: a single Embedding frame carrying Vector + Cost.
+	// On typed failure, writes a JSON-RPC error response directly to
+	// the shared stdout writer — same bypass as MethodInfer for the
+	// dispatcher's CodeInternal-only error path.
+	//
+	// The dispatcher passes proto.InferParams; the handler maps
+	// Intent -> Text and Model -> Model at the dispatch boundary per
+	// the plan's "Wire-shape decision".
+	d.Register(proto.MethodEmbed, embedHandler(client, cost, out, apiKey))
+
 	// --- Run ----------------------------------------------------------
 	if err := d.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, redactKey(fmt.Sprintf("aish-inference-cloud: %v", err), apiKey))
@@ -310,4 +322,52 @@ func classifyInferError(err error) (int, string) {
 		return ce.Code, ce.Message
 	}
 	return proto.CodeInternal, err.Error()
+}
+
+// embedHandler builds the MethodEmbed Handler closure. The handler
+// maps proto.InferParams -> proto.EmbedParams at the dispatch boundary
+// (the dispatcher's Handler signature uses InferParams; we treat
+// InferParams.Intent as the text-to-embed and InferParams.Model as the
+// embedding model id). The plan's "Wire-shape decision" §note records
+// this mapping.
+//
+// Error handling mirrors inferHandler: typed errors bypass the
+// dispatcher's CodeInternal-only error path by writing a JSON-RPC
+// error response directly to the shared (line-atomic) stdout writer.
+func embedHandler(client *anthropic.Client, cost *reliab.Cost, out io.Writer, apiKey string) rpc.Handler {
+	return func(hctx context.Context, params proto.InferParams) (<-chan proto.Frame, error) {
+		embedParams := proto.EmbedParams{
+			Text:  params.Intent,
+			Model: params.Model,
+		}
+		result, err := client.Embed(hctx, embedParams)
+		if err != nil {
+			code, msg := classifyInferError(err)
+			msg = redactKey(msg, apiKey)
+			if werr := writeErrorResponse(out, "", code, msg); werr != nil {
+				fmt.Fprintln(os.Stderr, redactKey(fmt.Sprintf("aish-inference-cloud: write error response: %v", werr), apiKey))
+			}
+			empty := make(chan proto.Frame)
+			close(empty)
+			return empty, nil
+		}
+
+		// Record cost for the embedding bucket. The model field
+		// distinguishes embed (e.g. "voyage-3") from infer
+		// (e.g. "claude-opus-4-7") in the aggregated cost log.
+		if cost != nil && result.Cost != nil {
+			if recErr := cost.Record(result.Cost.Model, result.Cost.TokensIn, result.Cost.TokensOut, result.Cost.USD); recErr != nil {
+				fmt.Fprintln(os.Stderr, redactKey(fmt.Sprintf("aish-inference-cloud: cost.Record: %v", recErr), apiKey))
+			}
+		}
+
+		ch := make(chan proto.Frame, 1)
+		ch <- proto.Frame{
+			Type:   proto.KindEmbedding,
+			Vector: result.Vector,
+			Cost:   result.Cost,
+		}
+		close(ch)
+		return ch, nil
+	}
 }

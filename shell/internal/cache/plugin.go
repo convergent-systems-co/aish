@@ -295,6 +295,91 @@ func (p *PluginClient) Infer(ctx context.Context, intent, os string) (string, fl
 	}
 }
 
+// Embed sends an embed request to the child and returns the vector.
+//
+// Implementation mirrors Infer: allocate a per-request ID, register a
+// pending channel, write the request, demultiplex frames. Embed expects
+// exactly one Embedding frame (non-streaming); any other Kind is treated
+// as an error.
+//
+// Cancellation via ctx aborts the wait the same way Infer does. On a
+// JSON-RPC error response the code+message are returned verbatim.
+func (p *PluginClient) Embed(ctx context.Context, text string) ([]float32, error) {
+	if p == nil {
+		return nil, errors.New("cache: Embed: nil PluginClient")
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, errors.New("cache: Embed: plugin client is closed")
+	}
+	p.mu.Unlock()
+
+	id := strconv.FormatInt(p.nextID.Add(1), 10)
+	ch := make(chan proto.Response, 4)
+	p.mu.Lock()
+	p.pending[id] = ch
+	p.mu.Unlock()
+
+	defer func() {
+		p.mu.Lock()
+		if existing, ok := p.pending[id]; ok && existing == ch {
+			delete(p.pending, id)
+		}
+		p.mu.Unlock()
+	}()
+
+	// The dispatcher carries proto.InferParams; we map the embed
+	// payload onto Intent (the text to embed). See plan §"Wire-shape
+	// decision".
+	req := proto.Request{
+		JSONRPC: proto.Version,
+		ID:      id,
+		Method:  proto.MethodEmbed,
+		Params: proto.InferParams{
+			Intent: text,
+		},
+	}
+	buf, err := json.Marshal(&req)
+	if err != nil {
+		return nil, fmt.Errorf("cache: Embed: marshal: %w", err)
+	}
+	buf = append(buf, '\n')
+
+	p.writeMu.Lock()
+	_, werr := p.stdin.Write(buf)
+	p.writeMu.Unlock()
+	if werr != nil {
+		return nil, fmt.Errorf("cache: Embed: write request: %w", werr)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case resp, open := <-ch:
+			if !open {
+				return nil, errors.New("cache: Embed: plugin stream closed before embedding frame")
+			}
+			if resp.Error != nil {
+				return nil, fmt.Errorf("cache: Embed: plugin error %d: %s", resp.Error.Code, resp.Error.Message)
+			}
+			if resp.Result == nil {
+				return nil, errors.New("cache: Embed: response has neither result nor error")
+			}
+			if resp.Result.Type != proto.KindEmbedding {
+				// Pong / token / complete frames are surface-protocol
+				// noise on an embed request; treat as a fault.
+				return nil, fmt.Errorf("cache: Embed: unexpected frame type %q", resp.Result.Type)
+			}
+			if len(resp.Result.Vector) == 0 {
+				return nil, errors.New("cache: Embed: empty vector in embedding frame")
+			}
+			return resp.Result.Vector, nil
+		}
+	}
+}
+
 // Close terminates the child cleanly. Closing stdin causes the child's
 // dispatcher to see EOF on its read goroutine and exit; Wait collects
 // the exit status. Idempotent — a second Close on an already-closed
