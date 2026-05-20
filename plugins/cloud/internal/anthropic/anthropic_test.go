@@ -364,9 +364,9 @@ func TestInfer_RealAnthropic_SmokeTest_OptIn(t *testing.T) {
 	if key == "" {
 		t.Skip("ANTHROPIC_API_KEY_INTEGRATION not set — skipping live smoke test")
 	}
-	// We do not actually hit the live API here in CI. This test exists
-	// so a developer can opt in by exporting the env var; CI never sets
-	// it. We do not assert behavior — the smoke is on connectivity only.
+	// Opt-in only: uses the live Anthropic API when ANTHROPIC_API_KEY_INTEGRATION
+	// is set (developer-driven smoke check); CI never sets it, so this test
+	// is skipped in CI. Connectivity-only assertions — no behavioral pinning.
 	c, err := NewClient(key, DefaultBaseURL, http.DefaultClient)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
