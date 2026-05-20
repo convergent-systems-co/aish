@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/convergent-systems-co/aish/shell/internal/env"
 )
 
 func TestNew(t *testing.T) {
@@ -90,6 +92,37 @@ func TestReadLine_BasicCases(t *testing.T) {
 			rest, _ := io.ReadAll(r)
 			if string(rest) != tc.wantRest {
 				t.Errorf("remaining stream = %q, want %q", string(rest), tc.wantRest)
+			}
+		})
+	}
+}
+
+// TestHomeDir covers the POSIX-or-Windows home-dir resolution.
+// HOME wins when both are set (POSIX takes precedence on every host).
+// USERPROFILE is the Windows fallback.
+func TestHomeDir(t *testing.T) {
+	cases := []struct {
+		name        string
+		home        string
+		userprofile string
+		want        string
+	}{
+		{name: "HOME set wins", home: "/home/u", userprofile: "C:\\Users\\u", want: "/home/u"},
+		{name: "USERPROFILE fallback (Windows)", home: "", userprofile: "C:\\Users\\u", want: "C:\\Users\\u"},
+		{name: "neither set returns empty", home: "", userprofile: "", want: ""},
+		{name: "empty HOME falls through to USERPROFILE", home: "", userprofile: "D:\\u", want: "D:\\u"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := env.New()
+			if tc.home != "" {
+				_ = e.Set("HOME", tc.home)
+			}
+			if tc.userprofile != "" {
+				_ = e.Set("USERPROFILE", tc.userprofile)
+			}
+			if got := homeDir(e); got != tc.want {
+				t.Errorf("homeDir = %q, want %q", got, tc.want)
 			}
 		})
 	}
