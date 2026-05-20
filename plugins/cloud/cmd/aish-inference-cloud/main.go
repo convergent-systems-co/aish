@@ -1,10 +1,17 @@
-// Command aish-inference-cloud is the Anthropic Cloud inference plugin
-// for aish. It reads JSON-RPC requests on stdin, dispatches to handlers,
-// and writes NDJSON responses on stdout.
+// Command aish-inference-cloud is the cloud inference plugin for aish.
+// It reads JSON-RPC requests on stdin, dispatches to handlers, and
+// writes NDJSON responses on stdout.
+//
+// Wire shape is Anthropic Messages API-compatible. The default endpoint
+// is the Convergent Systems LLM gateway
+// (api.convergent-systems.co/llm/v1), which fans out to Anthropic and
+// other providers behind a single auth surface. Override with --api-url
+// or $ANTHROPIC_BASE_URL when pointing at upstream Anthropic, a local
+// proxy, or an httptest stub.
 //
 // Configuration:
 //
-//	ANTHROPIC_API_KEY   required; auth for api.anthropic.com
+//	ANTHROPIC_API_KEY   required; bearer key for the LLM gateway
 //	ANTHROPIC_BASE_URL  optional; override the base URL (test stubs etc.)
 //	AISH_COST_LOG       optional; path to the JSONL cost log
 //
@@ -12,7 +19,7 @@
 //
 //	--version, -v   print version + build time and exit 0
 //	--help, -h      print usage and exit 0
-//	--api-url URL   override the Anthropic base URL (wins over $ANTHROPIC_BASE_URL)
+//	--api-url URL   override the base URL (wins over $ANTHROPIC_BASE_URL)
 //
 // On a missing $ANTHROPIC_API_KEY the binary writes a single-line error
 // (no value, no env-dump) to stderr and exits 2. Panics are caught by a

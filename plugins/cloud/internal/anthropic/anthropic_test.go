@@ -357,16 +357,19 @@ func TestInfer_SendsAPIKeyHeader(t *testing.T) {
 	}
 }
 
-// --- Smoke test against real api.anthropic.com (opt-in) ----------------
+// --- Smoke test against the real LLM gateway (opt-in) ------------------
 
-func TestInfer_RealAnthropic_SmokeTest_OptIn(t *testing.T) {
+func TestInfer_RealGateway_SmokeTest_OptIn(t *testing.T) {
 	key := os.Getenv("ANTHROPIC_API_KEY_INTEGRATION")
 	if key == "" {
 		t.Skip("ANTHROPIC_API_KEY_INTEGRATION not set — skipping live smoke test")
 	}
-	// Opt-in only: uses the live Anthropic API when ANTHROPIC_API_KEY_INTEGRATION
-	// is set (developer-driven smoke check); CI never sets it, so this test
-	// is skipped in CI. Connectivity-only assertions — no behavioral pinning.
+	// Opt-in only: hits whatever DefaultBaseURL points at (currently the
+	// Convergent Systems gateway at api.convergent-systems.co/llm/v1, which
+	// forwards Messages-API-compatible traffic to Anthropic). Set
+	// $ANTHROPIC_BASE_URL to override and hit upstream Anthropic directly.
+	// CI never sets ANTHROPIC_API_KEY_INTEGRATION, so this test skips in CI.
+	// Connectivity-only assertions — no behavioral pinning.
 	c, err := NewClient(key, DefaultBaseURL, http.DefaultClient)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
