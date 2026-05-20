@@ -286,6 +286,13 @@ func TestInfer_CtxDeadline_ReturnsTimeout(t *testing.T) {
 	t.Cleanup(func() { close(block) })
 
 	srv := newServerWithHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		// Drain the request body so the server's background reader
+		// starts on the connection. Without this, httptest.Server.Close()
+		// blocks indefinitely on a StateActive connection during
+		// t.Cleanup — the server can't notice the client's TCP close
+		// because no goroutine is reading from the connection.
+		// See HANDOFF.md (issue identified by Coder T2 during v0.1-3).
+		_, _ = io.Copy(io.Discard, r.Body)
 		// Hold the connection open until the test cleans up.
 		select {
 		case <-r.Context().Done():
