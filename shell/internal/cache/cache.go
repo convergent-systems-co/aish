@@ -85,7 +85,7 @@ func (c *Cache) Resolve(ctx context.Context, intent, os string) (string, bool, e
 	// invocation itself is still valid — callers that want it anyway
 	// can `errors.Is(err, somethingSpecific)` in the future. For now
 	// we treat write-back failure as a hard error.
-	if err := c.store.Write(intent, os, invocation, confidence); err != nil {
+	if err := c.store.Write(intent, os, invocation, confidence, nil); err != nil {
 		return "", false, fmt.Errorf("cache: Resolve: write-back: %w", err)
 	}
 	return invocation, false, nil
