@@ -135,11 +135,14 @@ func TestSnapshotWalksDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SnapshotMany: %v", err)
 	}
-	// Two files, plus the directory marker itself.
+	// Two regular files were snapshotted. Directory markers also
+	// appear in the record list (Op=OpDelete with SnapshotDir=="")
+	// because Restore needs them to recreate the tree, but they carry
+	// no bytes — count only the file-level records.
 	want := 2
 	count := 0
 	for _, r := range recs {
-		if r.Op == OpDelete {
+		if r.Op == OpDelete && r.SnapshotDir != "" {
 			count++
 		}
 	}
