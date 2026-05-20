@@ -69,13 +69,9 @@ func TestExpansionInDoubleQuotes(t *testing.T) {
 }
 
 // TestExpansionInSingleQuotes — single-quoted strings preserve `$VAR`
-// literally (no expansion). POSIX semantic.
-//
-// SKIPPED pending fix for #163: aish currently expands variables on the
-// whole line before tokenization, which breaks single-quote literal
-// semantics. Remove the t.Skip when #163 lands.
+// literally (no expansion). POSIX semantic. Fixed by #163 — also serves
+// as a regression seatbelt for that defect.
 func TestExpansionInSingleQuotes(t *testing.T) {
-	t.Skip("known defect: see https://github.com/convergent-systems-co/aish/issues/163")
 	requireBinary(t, "echo")
 	s := run(t, script("export X=expanded", `echo 'x=$X'`))
 	s.assertExit(0)

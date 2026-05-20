@@ -115,23 +115,65 @@ func (e *Env) Environ() []string {
 // string (POSIX default). A literal `$` followed by a non-identifier
 // character is left unchanged — `price: $` stays as written.
 //
+// Quote handling (POSIX):
+//
+//   - Inside single quotes (`'…'`), nothing expands. `$VAR` is a literal
+//     four characters.
+//   - Inside double quotes (`"…"`), `$VAR` / `${VAR}` / `$?` expand normally;
+//     a literal `'` is just a single-quote character.
+//   - Quote characters themselves are preserved in the output so the
+//     downstream parser can strip them during tokenisation.
+//
+// An unterminated quote is NOT this function's concern — parser.Parse
+// reports it as a tokenisation error. Expand simply leaves the trailing
+// in-quote region literal.
+//
 // Identifier rule: a bare `$` consumes a leading letter or underscore,
 // then any run of letters, digits, or underscores. `$1` is left alone
 // for v0.1-1 (positional params are deferred to v0.3-1).
 func (e *Env) Expand(input string, lastExit int) string {
-	if !strings.ContainsRune(input, '$') {
+	// Fast path: no `$` and no quotes means the input passes through.
+	if !strings.ContainsAny(input, "$'\"") {
 		return input
 	}
 
 	var b strings.Builder
 	b.Grow(len(input))
 	runes := []rune(input)
+
+	// inSingle / inDouble track which (if any) quote region we're inside.
+	// At most one is true at a time — single quotes inside double quotes
+	// are literal characters (and vice versa).
+	var inSingle, inDouble bool
+
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
+
+		// Quote-state transitions. The quote character itself is preserved
+		// in the output so the parser can do its own quote-aware
+		// tokenisation downstream.
+		if r == '\'' && !inDouble {
+			inSingle = !inSingle
+			b.WriteRune(r)
+			continue
+		}
+		if r == '"' && !inSingle {
+			inDouble = !inDouble
+			b.WriteRune(r)
+			continue
+		}
+
+		// Inside single quotes, nothing else is special — including `$`.
+		if inSingle {
+			b.WriteRune(r)
+			continue
+		}
+
 		if r != '$' {
 			b.WriteRune(r)
 			continue
 		}
+
 		// Lookahead: nothing after `$` -> emit literal `$`.
 		if i+1 >= len(runes) {
 			b.WriteByte('$')
