@@ -16,6 +16,7 @@ import (
 	"github.com/convergent-systems-co/aish/shell/internal/env"
 	"github.com/convergent-systems-co/aish/shell/internal/exec"
 	"github.com/convergent-systems-co/aish/shell/internal/parser"
+	"github.com/convergent-systems-co/aish/shell/internal/theme"
 )
 
 // Shell holds runtime state across REPL iterations: working directory,
@@ -29,6 +30,9 @@ type Shell struct {
 	// lastExit is the exit code of the most recent foreground pipeline.
 	// Expanded into `$?` and `${?}` by env.Expand.
 	lastExit int
+	// themes is the registry of available shell brands. Always non-nil
+	// after New() — bundled themes guarantee a usable "default" theme.
+	themes *theme.Registry
 }
 
 // New returns a Shell with cwd initialised to the current process working
@@ -41,9 +45,21 @@ func New() *Shell {
 	if err != nil {
 		cwd = "/"
 	}
+	e := env.FromSlice(os.Environ())
+	reg := theme.NewRegistry()
+
+	// Restore persisted active theme from ~/.aish/config.toml. Failures
+	// are silent — the default theme is always a usable fallback.
+	if home, _ := e.Get("HOME"); home != "" {
+		if active := theme.ReadActiveTheme(home); active != "" {
+			_ = reg.SetActive(active) // unknown name silently falls through to "default"
+		}
+	}
+
 	return &Shell{
-		cwd: cwd,
-		env: env.FromSlice(os.Environ()),
+		cwd:    cwd,
+		env:    e,
+		themes: reg,
 	}
 }
 
@@ -140,6 +156,16 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 			return nil
 		}
 		s.SetLastExit(0)
+		return nil
+	}
+
+	// Built-in: `theme list | show <name> | set <name> | preview <name>`.
+	// All theme administration runs here, not via an external; the active
+	// theme drives the prompt rendering inside this very process.
+	if line == "theme" || strings.HasPrefix(line, "theme ") || strings.HasPrefix(line, "theme\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "theme"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.themeBuiltin(args, stdout, stderr))
 		return nil
 	}
 
@@ -245,8 +271,14 @@ func (s *Shell) SetLastExit(code int) {
 }
 
 // Prompt renders the prompt string aish writes before each REPL read.
-// v0.1-1 format: "<cwd-shortened> > " where `~` substitutes for the
-// $HOME prefix. No git segment, no Nerd Font.
+//
+// v0.1-1 baseline: "<cwd-shortened> > " where `~` substitutes for the
+// $HOME prefix.
+//
+// v0.2-5 theming: when an active theme is present, the cwd is wrapped in
+// the theme's `prompt` ANSI sequence and the `prompt_char` glyph (e.g.
+// "❯") replaces the literal ">". Themes with no prompt color or no
+// glyph fall back to the baseline string.
 func (s *Shell) Prompt() string {
 	display := s.cwd
 	if home, ok := s.env.Get("HOME"); ok && home != "" {
@@ -257,7 +289,15 @@ func (s *Shell) Prompt() string {
 			display = "~" + display[len(home):]
 		}
 	}
-	return display + " > "
+
+	active := s.themes.Active()
+	promptChar := active.Glyph("prompt_char", ">")
+	return active.ColorPrompt(display) + " " + promptChar + " "
+}
+
+// Themes returns the theme registry. Exposed for the `theme` built-in.
+func (s *Shell) Themes() *theme.Registry {
+	return s.themes
 }
 
 // expandTilde returns path with a leading `~` or `~/` replaced by $HOME.
