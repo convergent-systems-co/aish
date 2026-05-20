@@ -39,3 +39,6 @@ logs/
 *.tmp
 *.temp
 .cache/
+
+# AI tooling state (checkpoints, transient logs)
+.ai/
