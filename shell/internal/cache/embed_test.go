@@ -165,9 +165,9 @@ func TestStore_LookupNearest_PicksHighestAboveThreshold(t *testing.T) {
 		intent, invocation string
 		emb                []float32
 	}{
-		{"far",  "echo far",  []float32{1, 0, 0}},                       // similarity 0
-		{"mid",  "echo mid",  []float32{0.7071, 0.7071, 0}},             // ~0.7071
-		{"near", "echo near", []float32{0.97, 0.0, 0.2425}},             // ~0.97 with query
+		{"far", "echo far", []float32{1, 0, 0}},             // similarity 0
+		{"mid", "echo mid", []float32{0.7071, 0.7071, 0}},   // ~0.7071
+		{"near", "echo near", []float32{0.97, 0.0, 0.2425}}, // ~0.97 with query
 	}
 	for _, r := range rows {
 		if err := store.Write(r.intent, "darwin", r.invocation, 1.0, r.emb); err != nil {

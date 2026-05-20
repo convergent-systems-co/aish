@@ -173,6 +173,96 @@ func TestPluginCloseIdempotent(t *testing.T) {
 	}
 }
 
+func TestPluginEmbedRoundTrip(t *testing.T) {
+	plugin, err := Start(PluginConfig{BinaryPath: stubBinary, Stderr: io.Discard})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = plugin.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	got, err := plugin.Embed(ctx, "hello world")
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	want := stubEmbedHelper("hello world")
+	if len(got) != len(want) {
+		t.Fatalf("vector len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("vector[%d] = %v, want %v", i, got[i], want[i])
+			break
+		}
+	}
+}
+
+func TestPluginEmbedIsConcurrent(t *testing.T) {
+	plugin, err := Start(PluginConfig{BinaryPath: stubBinary, Stderr: io.Discard})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = plugin.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const n = 8
+	intents := make([]string, n)
+	for i := range intents {
+		intents[i] = "embed-intent-" + string(rune('a'+i))
+	}
+	var wg sync.WaitGroup
+	results := make([][]float32, n)
+	errs := make([]error, n)
+	for i, intent := range intents {
+		wg.Add(1)
+		go func(idx int, in string) {
+			defer wg.Done()
+			v, err := plugin.Embed(ctx, in)
+			results[idx] = v
+			errs[idx] = err
+		}(i, intent)
+	}
+	wg.Wait()
+	// Each result must match the deterministic stub vector for its
+	// own intent — proves the demultiplexer didn't cross-wire.
+	for i, intent := range intents {
+		if errs[i] != nil {
+			t.Errorf("Embed[%d]: %v", i, errs[i])
+			continue
+		}
+		want := stubEmbedHelper(intent)
+		if len(results[i]) != len(want) {
+			t.Errorf("Embed[%d] vector len = %d, want %d", i, len(results[i]), len(want))
+			continue
+		}
+		for j := range want {
+			if results[i][j] != want[j] {
+				t.Errorf("Embed[%d] vector[%d] = %v, want %v (cross-wired?)", i, j, results[i][j], want[j])
+				break
+			}
+		}
+	}
+}
+
+func TestPluginEmbedAfterClose(t *testing.T) {
+	plugin, err := Start(PluginConfig{BinaryPath: stubBinary, Stderr: io.Discard})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := plugin.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := plugin.Embed(ctx, "intent"); err == nil {
+		t.Error("Embed after Close: expected error, got nil")
+	}
+}
+
 func TestPluginInferAfterClose(t *testing.T) {
 	plugin, err := Start(PluginConfig{BinaryPath: stubBinary})
 	if err != nil {

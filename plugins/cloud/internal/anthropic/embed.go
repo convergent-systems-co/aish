@@ -158,4 +158,3 @@ func estimateEmbedUSD(model string, tokensIn int) float64 {
 	const perMillion = 1_000_000.0
 	return float64(tokensIn) * p / perMillion
 }
-
