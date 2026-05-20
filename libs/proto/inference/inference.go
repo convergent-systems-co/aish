@@ -65,6 +65,42 @@ type InferParams struct {
 	Model string `json:"model,omitempty"`
 }
 
+// EmbedParams is the helper view consumers use when calling MethodEmbed.
+// It is NOT the on-wire shape — the rpc.Dispatcher carries Request.Params
+// as InferParams; handlers map InferParams -> EmbedParams at the
+// dispatch boundary (Intent -> Text, Model -> Model). Keeping EmbedParams
+// here serves as the documented contract for what an embed request
+// requires.
+//
+// See plan: .artifacts/plans/v0.1-2-embed.md §"Wire-shape decision".
+type EmbedParams struct {
+	// Text is the natural-language string to embed.
+	Text string `json:"text"`
+	// Model optionally pins the embedding model identifier
+	// (e.g. "voyage-3", "claude-embed-v1"). When empty, the plugin
+	// chooses its default.
+	Model string `json:"model,omitempty"`
+}
+
+// EmbedResult is the helper view consumers use when reading the result
+// of MethodEmbed. The wire representation is a Frame with
+// Type=KindEmbedding carrying Vector and Cost; this struct documents
+// the semantic shape (model id + vector + cost) for callers that want
+// a typed projection.
+type EmbedResult struct {
+	// Vector is the embedding produced by the plugin. Dimensionality is
+	// model-specific; callers MUST NOT assume a fixed length.
+	Vector []float32 `json:"vector"`
+	// Model is the model identifier the plugin used to produce Vector.
+	// Distinct from the inference model; recorded in Cost.Model for the
+	// telemetry pipeline.
+	Model string `json:"model,omitempty"`
+	// Cost is the per-request token + USD telemetry attached to the
+	// embedding request. Same shape as the Infer Cost block; the Model
+	// field distinguishes embed vs infer in the aggregated cost log.
+	Cost *Cost `json:"cost,omitempty"`
+}
+
 // InferContext is the runtime context block carried in InferParams.
 type InferContext struct {
 	// CWD is the shell's working directory at request time.
@@ -114,6 +150,12 @@ type Frame struct {
 
 	// --- For Kind=`pong` ---
 	// (no additional fields)
+
+	// --- For Kind=`embedding` ---
+	// Vector is the embedding produced by a MethodEmbed handler.
+	// Dimensionality is model-specific. omitempty keeps this field off
+	// the wire for non-embedding frames.
+	Vector []float32 `json:"vector,omitempty"`
 }
 
 // Kind is the Frame discriminator.
@@ -127,6 +169,9 @@ const (
 	KindComplete Kind = "complete"
 	// KindPong is the response to MethodPing.
 	KindPong Kind = "pong"
+	// KindEmbedding is the terminal frame for MethodEmbed. Carries
+	// Vector and Cost; no token-streaming intermediate frames.
+	KindEmbedding Kind = "embedding"
 )
 
 // Cost is the per-request token + USD telemetry attached to a Complete

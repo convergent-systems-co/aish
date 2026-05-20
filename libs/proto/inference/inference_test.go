@@ -163,14 +163,155 @@ func TestVersionConstantIsTwoDotZero(t *testing.T) {
 // change without a coordinated plugin-side update.
 func TestKindConstantsAreStable(t *testing.T) {
 	cases := map[Kind]string{
-		KindToken:    "token",
-		KindComplete: "complete",
-		KindPong:     "pong",
+		KindToken:     "token",
+		KindComplete:  "complete",
+		KindPong:      "pong",
+		KindEmbedding: "embedding",
 	}
 	for k, want := range cases {
 		if string(k) != want {
 			t.Errorf("Kind %s = %q, want %q", want, string(k), want)
 		}
+	}
+}
+
+// TestMethodEmbedConstantIsStable — plugins on the other side switch on
+// this string. Pinning it in a test prevents a silent rename.
+func TestMethodEmbedConstantIsStable(t *testing.T) {
+	if MethodEmbed != "embed" {
+		t.Errorf("MethodEmbed = %q, want %q", MethodEmbed, "embed")
+	}
+}
+
+// TestEmbedParamsRoundTrip — the helper view marshals with snake_case
+// fields. EmbedParams is not carried directly on the wire (the dispatcher
+// uses InferParams), but a plugin that surfaces an embed-shaped payload
+// to the user (e.g. in a JSONL log) needs the documented field names.
+func TestEmbedParamsRoundTrip(t *testing.T) {
+	original := EmbedParams{
+		Text:  "list files in cwd",
+		Model: "voyage-3",
+	}
+	raw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, want := range []string{
+		`"text":"list files in cwd"`,
+		`"model":"voyage-3"`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("marshalled EmbedParams missing %q\nGot: %s", want, string(raw))
+		}
+	}
+	var rt EmbedParams
+	if err := json.Unmarshal(raw, &rt); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if rt != original {
+		t.Errorf("round-trip mismatch\nwant: %+v\ngot:  %+v", original, rt)
+	}
+}
+
+// TestEmbedParams_ModelOmitempty — empty Model must not surface on the
+// wire (lets the plugin pick its default without bloating the payload).
+func TestEmbedParams_ModelOmitempty(t *testing.T) {
+	raw, _ := json.Marshal(EmbedParams{Text: "x"})
+	if strings.Contains(string(raw), `"model":`) {
+		t.Errorf("empty Model leaked onto the wire: %s", string(raw))
+	}
+}
+
+// TestFrameEmbeddingShape — a Frame with Type=embedding carries Vector
+// + Cost and omits the infer-specific fields by virtue of omitempty.
+func TestFrameEmbeddingShape(t *testing.T) {
+	f := Frame{
+		Type:   KindEmbedding,
+		Vector: []float32{0.1, -0.2, 0.3},
+		Cost: &Cost{
+			Model:     "voyage-3",
+			TokensIn:  10,
+			TokensOut: 0,
+			USD:       0.0001,
+		},
+	}
+	raw, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{
+		`"type":"embedding"`,
+		`"vector":[0.1,-0.2,0.3]`,
+		`"cost":`,
+		`"model":"voyage-3"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("embedding frame missing %q\nGot: %s", want, got)
+		}
+	}
+	// Embedding frames MUST NOT include infer-specific fields.
+	for _, unwanted := range []string{`"data":`, `"invocation":`, `"confidence":`} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("embedding frame unexpectedly includes %q: %s", unwanted, got)
+		}
+	}
+
+	// Round-trip the Vector to confirm float32 values survive intact.
+	var rt Frame
+	if err := json.Unmarshal(raw, &rt); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if rt.Type != KindEmbedding {
+		t.Errorf("Type = %q, want %q", rt.Type, KindEmbedding)
+	}
+	if len(rt.Vector) != 3 {
+		t.Fatalf("Vector len = %d, want 3", len(rt.Vector))
+	}
+	for i, v := range []float32{0.1, -0.2, 0.3} {
+		if rt.Vector[i] != v {
+			t.Errorf("Vector[%d] = %v, want %v", i, rt.Vector[i], v)
+		}
+	}
+}
+
+// TestFrameTokenOmitsVector — Vector must omitempty on non-embedding
+// frames so the token-streaming hot path stays small on the wire.
+func TestFrameTokenOmitsVector(t *testing.T) {
+	tok := Frame{Type: KindToken, Data: "ls"}
+	raw, _ := json.Marshal(tok)
+	if strings.Contains(string(raw), `"vector":`) {
+		t.Errorf("token frame leaked vector field: %s", string(raw))
+	}
+}
+
+// TestEmbedResultRoundTrip — the helper result type round-trips with the
+// expected tag names.
+func TestEmbedResultRoundTrip(t *testing.T) {
+	original := EmbedResult{
+		Vector: []float32{1.5, 2.5},
+		Model:  "voyage-3",
+		Cost:   &Cost{Model: "voyage-3", TokensIn: 5, USD: 0.0001},
+	}
+	raw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, want := range []string{
+		`"vector":[1.5,2.5]`,
+		`"model":"voyage-3"`,
+		`"cost":`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("marshalled EmbedResult missing %q\nGot: %s", want, string(raw))
+		}
+	}
+	var rt EmbedResult
+	if err := json.Unmarshal(raw, &rt); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if rt.Model != original.Model || len(rt.Vector) != 2 {
+		t.Errorf("round-trip mismatch: got %+v", rt)
 	}
 }
 
