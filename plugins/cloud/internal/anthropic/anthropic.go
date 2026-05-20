@@ -1,7 +1,8 @@
 // Package anthropic is the Claude / Anthropic Messages API client used
-// by aish-inference-cloud. It speaks SSE to /v1/messages and translates
-// each delta into a proto.Frame, terminated by a Complete frame
-// carrying the assembled invocation, confidence, and cost telemetry.
+// by aish-inference-cloud. It speaks SSE to <base>/messages (relative
+// to the configured base URL — see DefaultBaseURL) and translates each
+// delta into a proto.Frame, terminated by a Complete frame carrying
+// the assembled invocation, confidence, and cost telemetry.
 //
 // The package is invoked through the rpc.Dispatcher; it does not touch
 // stdin, stdout, or the JSON-RPC envelope shape. The API key is held
@@ -22,9 +23,15 @@ import (
 	proto "github.com/convergent-systems-co/aish/libs/proto/inference"
 )
 
-// DefaultBaseURL is the production Anthropic Messages API endpoint.
-// Tests inject an httptest.Server URL instead.
-const DefaultBaseURL = "https://api.anthropic.com"
+// DefaultBaseURL is the production LLM-gateway endpoint aish points at
+// by default. It's Convergent Systems' multi-provider routing layer,
+// which speaks an Anthropic-Messages-API-compatible shape on its
+// /llm/v1/* paths. Override with $LLM_BASE_URL (preferred) or
+// $ANTHROPIC_BASE_URL (legacy) to point at upstream Anthropic, a local
+// proxy, an httptest stub, etc.
+//
+// Tests inject an httptest.Server URL via NewClient(baseURL, ...).
+const DefaultBaseURL = "https://api.convergent-systems.co/llm/v1"
 
 // defaultModel is the model id used when InferParams.Model is empty.
 const defaultModel = "claude-opus-4-7"
@@ -96,7 +103,7 @@ func (c *Client) String() string {
 	return fmt.Sprintf("anthropic.Client(baseURL=%s, apiKey=[REDACTED])", c.baseURL)
 }
 
-// messagesRequest is the JSON body sent to /v1/messages.
+// messagesRequest is the JSON body sent to <base>/messages.
 type messagesRequest struct {
 	Model     string           `json:"model"`
 	MaxTokens int              `json:"max_tokens"`
@@ -145,7 +152,13 @@ func (c *Client) Infer(ctx context.Context, params proto.InferParams) (<-chan pr
 		}
 	}
 
-	url := c.baseURL + "/v1/messages"
+	// Path note: the default base URL ALREADY ends in /llm/v1, so we
+	// append `/messages` without re-stating /v1. When a caller overrides
+	// the base URL to plain `https://api.anthropic.com` (legacy /v1 in
+	// the path), they need to point at `https://api.anthropic.com/v1`
+	// so this concatenation lands at the right place. The plugin
+	// `--api-url` flag is the supported override surface.
+	url := c.baseURL + "/messages"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, &CodedError{
