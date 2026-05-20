@@ -119,15 +119,19 @@ func TestSetLastExitRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPromptShape verifies the v0.1-1 prompt format: "<cwd-shortened> > "
-// with ~ substituting for $HOME prefix. Gates #11.
+// TestPromptShape verifies the prompt format: cwd body + space +
+// prompt_char + space, with ~ substituting for $HOME prefix. Gates #11.
 //
 // Isolation note: shell.New() reads ~/.aish/config.toml from $HOME to
 // restore the persisted active theme. Without isolation the developer's
-// real `theme set` (e.g. nord-powerline with `❯` glyph) leaks into
-// the test, breaking the " > " suffix assertion. t.Setenv points $HOME
-// at a tempdir (with no config.toml) so New() falls through to the
-// "default" theme whose prompt_char IS ">".
+// real `theme set` (e.g. nord-powerline with `❯` glyph) leaks into the
+// test. t.Setenv points $HOME at a tempdir so New() falls through to
+// the "default" theme (prompt_char "=" ">").
+//
+// v0.2-5 update: the prompt_char is now wrapped in the theme's prompt-
+// role ANSI sequence (themes color the char per character_color). We
+// therefore strip ANSI before the suffix check rather than requiring
+// the bare literal " > " — the VISIBLE shape is unchanged.
 func TestPromptShape(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
@@ -135,16 +139,38 @@ func TestPromptShape(t *testing.T) {
 	if err := s.Cd(dir); err != nil {
 		t.Fatalf("Cd: %v", err)
 	}
-	got := s.Prompt()
-	// The prompt must end with the ` > ` separator (literal: space, >, space).
+	got := stripANSI(s.Prompt())
 	if !strings.HasSuffix(got, " > ") {
-		t.Errorf("Prompt() = %q, want suffix %q", got, " > ")
+		t.Errorf("Prompt() (ANSI-stripped) = %q, want suffix %q", got, " > ")
 	}
-	// The prompt body must mention the cwd.
 	if !strings.Contains(got, filepath.Base(dir)) {
 		t.Errorf("Prompt() = %q, want to contain cwd basename %q",
 			got, filepath.Base(dir))
 	}
+}
+
+// stripANSI removes CSI sequences (the only ANSI form aish emits today —
+// 24-bit foreground escapes from theme.Compile) from s, so tests can
+// assert on visible content without being coupled to color details.
+func stripANSI(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			// Skip until the terminating letter (any byte in 0x40-0x7e).
+			j := i + 2
+			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
+				j++
+			}
+			if j < len(s) {
+				j++ // consume the terminator
+			}
+			i = j - 1
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // TestPromptHomeTilde verifies that when cwd is under $HOME, the prompt

@@ -320,24 +320,17 @@ func (s *Shell) SetLastExit(code int) {
 // v0.1-1 baseline: "<cwd-shortened> > " where `~` substitutes for the
 // $HOME prefix.
 //
-// v0.2-5 theming: when an active theme is present, the cwd is wrapped in
-// the theme's `prompt` ANSI sequence and the `prompt_char` glyph (e.g.
-// "❯") replaces the literal ">". Themes with no prompt color or no
-// glyph fall back to the baseline string.
+// v0.2-5 multi-segment theming: the active theme declares an ordered
+// list of segments in `[prompt].segments`. Prompt() walks the list via
+// renderPromptBody (segments.go), space-joins the rendered segments,
+// and appends the themed prompt_char glyph. Segments that have no data
+// for the current state (e.g. git when cwd is not in a repo, exit when
+// last exit was 0) render as empty and drop out of the joined body.
 func (s *Shell) Prompt() string {
-	display := s.cwd
-	if home := homeDir(s.env); home != "" {
-		switch {
-		case display == home:
-			display = "~"
-		case strings.HasPrefix(display, home+string(filepath.Separator)):
-			display = "~" + display[len(home):]
-		}
-	}
-
 	active := s.themes.Active()
+	body := s.renderPromptBody(active)
 	promptChar := active.Glyph("prompt_char", ">")
-	return active.ColorPrompt(display) + " " + promptChar + " "
+	return body + " " + active.ColorPrompt(promptChar) + " "
 }
 
 // Themes returns the theme registry. Exposed for the `theme` built-in.
