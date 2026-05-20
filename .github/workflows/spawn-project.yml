@@ -1,0 +1,152 @@
+name: spawn — project pipeline auto-transitions
+
+# Auto-moves linked issues' Pipeline field on the "aish Delivery" project
+# in response to PR lifecycle events. Closes the loop on the /spawn pipeline
+# without anyone touching the board.
+#
+# Required secret:
+#   PROJECT_TOKEN — PAT with `project` scope and `repo` scope. Add at
+#   Settings -> Secrets and variables -> Actions. The default GITHUB_TOKEN
+#   does not have org-level Projects v2 write access.
+#
+# Pipeline transitions wired here:
+#   pull_request opened/reopened/ready_for_review -> Review
+#   pull_request closed && merged                 -> Merged
+#   pull_request_review changes_requested         -> Coding
+#
+# Agent-driven transitions (Backlog -> In Plan -> TDD -> Coding -> Tester)
+# are not handled here — those are written by /spawn agents via
+# .artifacts/spawn/board.py.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, closed]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  PROJECT_OWNER: convergent-systems-co
+  PROJECT_NUMBER: 2
+  PIPELINE_FIELD_NAME: Pipeline
+
+jobs:
+  transition:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pick target Pipeline state
+        id: target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+        run: |
+          target=""
+          case "${EVENT_NAME}-${EVENT_ACTION}" in
+            pull_request-opened|pull_request-reopened|pull_request-ready_for_review)
+              target="Review"
+              ;;
+            pull_request-closed)
+              if [ "$PR_MERGED" = "true" ]; then
+                target="Merged"
+              fi
+              ;;
+            pull_request_review-submitted)
+              if [ "$REVIEW_STATE" = "changes_requested" ]; then
+                target="Coding"
+              fi
+              ;;
+          esac
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "Target Pipeline state: ${target:-<none>}"
+
+      - name: Extract linked issues from PR body
+        id: linked
+        if: steps.target.outputs.target != ''
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          numbers=$(printf '%s\n' "$PR_BODY" \
+            | grep -iEo '(closes|fixes|resolves)[[:space:]]+#[0-9]+' \
+            | grep -Eo '[0-9]+' \
+            | sort -un \
+            | tr '\n' ' ')
+          echo "numbers=$numbers" >> "$GITHUB_OUTPUT"
+          echo "Linked issues: ${numbers:-<none>}"
+
+      - name: Move linked issues on the project board
+        if: steps.target.outputs.target != '' && steps.linked.outputs.numbers != ''
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          OWNER: ${{ env.PROJECT_OWNER }}
+          PROJECT_NUMBER: ${{ env.PROJECT_NUMBER }}
+          FIELD_NAME: ${{ env.PIPELINE_FIELD_NAME }}
+          TARGET: ${{ steps.target.outputs.target }}
+          NUMBERS: ${{ steps.linked.outputs.numbers }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Resolve project id + Pipeline field id + target option id once.
+          read -r PROJECT_ID FIELD_ID OPTION_ID < <(gh api graphql -f query='
+            query($owner:String!, $num:Int!, $field:String!) {
+              organization(login:$owner) {
+                projectV2(number:$num) {
+                  id
+                  field(name:$field) {
+                    ... on ProjectV2SingleSelectField {
+                      id options { id name }
+                    }
+                  }
+                }
+              }
+            }' -F owner="$OWNER" -F num="$PROJECT_NUMBER" -F field="$FIELD_NAME" \
+            --jq ".data.organization.projectV2 as \$p
+                  | .data.organization.projectV2.field.options[]
+                    | select(.name == env.TARGET) as \$o
+                  | \"\(\$p.id) \(\$p.field.id) \(\$o.id)\"")
+
+          if [ -z "${OPTION_ID:-}" ]; then
+            echo "::error::could not resolve Pipeline option for '$TARGET'"
+            exit 1
+          fi
+
+          repo_owner="${REPO%/*}"
+          repo_name="${REPO#*/}"
+
+          for n in $NUMBERS; do
+            ITEM_ID=$(gh api graphql -f query='
+              query($owner:String!, $repo:String!, $num:Int!) {
+                repository(owner:$owner, name:$repo) {
+                  issue(number:$num) {
+                    projectItems(first:10) {
+                      nodes { id project { id } }
+                    }
+                  }
+                }
+              }' -F owner="$repo_owner" -F repo="$repo_name" -F num="$n" \
+              --jq ".data.repository.issue.projectItems.nodes[]
+                    | select(.project.id == env.PROJECT_ID)
+                    | .id" | head -1)
+
+            if [ -z "$ITEM_ID" ]; then
+              echo "#$n: not on project — skipping"
+              continue
+            fi
+
+            gh api graphql -f query='
+              mutation($p:ID!, $i:ID!, $f:ID!, $o:String!) {
+                updateProjectV2ItemFieldValue(input:{
+                  projectId:$p, itemId:$i, fieldId:$f,
+                  value:{singleSelectOptionId:$o}
+                }) { projectV2Item { id } }
+              }' -F p="$PROJECT_ID" -F i="$ITEM_ID" \
+                 -F f="$FIELD_ID" -F o="$OPTION_ID" \
+              > /dev/null
+
+            echo "#$n: Pipeline -> $TARGET"
+          done
