@@ -1,99 +1,66 @@
-# aish — Makefile
+# aish monorepo — top-level Makefile
 #
-# Drives builds, tests, lint, cross-compile releases, and /spawn board ops.
+# Orchestrates per-module builds across the Go workspace and exposes
+# /spawn board helpers. Each subdir listed in MODULES has its own
+# Makefile; targets delegate via `$(MAKE) -C <mod>`.
+#
 # Run `make help` to list targets.
 
-# ---- Project metadata ----
-MODULE      := github.com/convergent-systems-co/aish
-BINARY      := aish
-CMD         := ./cmd/$(BINARY)
-PKG_ALL     := ./...
-VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-BUILD_TIME  := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS     := -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
-
-# ---- Cross-compile matrix ----
-DIST        := dist
-PLATFORMS   := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
-
-# ---- Tooling ----
-GO          ?= go
-GOFLAGS     ?=
+# ---- Modules in this workspace ----
+# Append modules to MODULES as they come online (each adds its own go.mod).
+MODULES := shell
+# Future additions:
+#   term plugins/cloud plugins/ollama plugins/wasm plugins/remote
+#   libs/proto libs/cache libs/history
 
 .DEFAULT_GOAL := help
 
-# ---- Build ----
+# ---- Per-module delegation ----
 .PHONY: build
-build: ## Build aish for the host platform into dist/aish
-	@mkdir -p $(DIST)
-	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY) $(CMD)
-	@echo "→ $(DIST)/$(BINARY) ($(VERSION))"
+build: ## Build every module's binary
+	@for m in $(MODULES); do echo "→ $$m"; $(MAKE) --no-print-directory -C $$m build || exit 1; done
 
 .PHONY: build-all
-build-all: ## Cross-compile aish for darwin/linux × amd64/arm64
-	@mkdir -p $(DIST)
-	@for p in $(PLATFORMS); do \
-		os=$${p%/*}; arch=$${p#*/}; \
-		out=$(DIST)/$(BINARY)-$$os-$$arch; \
-		echo "→ $$out"; \
-		GOOS=$$os GOARCH=$$arch $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $$out $(CMD) || exit 1; \
-	done
+build-all: ## Cross-compile every module for the full platform matrix
+	@for m in $(MODULES); do echo "→ $$m"; $(MAKE) --no-print-directory -C $$m build-all || exit 1; done
 
-.PHONY: install
-install: ## Install aish into $$GOBIN (or GOPATH/bin)
-	$(GO) install $(GOFLAGS) -ldflags "$(LDFLAGS)" $(CMD)
-
-.PHONY: run
-run: build ## Build then run aish (dev iteration)
-	$(DIST)/$(BINARY)
-
-# ---- Quality ----
 .PHONY: test
-test: ## Run all unit tests with race detector
-	$(GO) test $(GOFLAGS) -race -count=1 $(PKG_ALL)
-
-.PHONY: test-cover
-test-cover: ## Run tests with coverage report
-	$(GO) test $(GOFLAGS) -race -count=1 -coverprofile=coverage.out $(PKG_ALL)
-	$(GO) tool cover -func=coverage.out | tail -1
+test: ## Test every module
+	@for m in $(MODULES); do echo "→ $$m"; $(MAKE) --no-print-directory -C $$m test || exit 1; done
 
 .PHONY: lint
-lint: ## go vet + (optional) golangci-lint
-	$(GO) vet $(PKG_ALL)
-	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run || echo "(golangci-lint not installed — skipping)"
+lint: ## Lint every module
+	@for m in $(MODULES); do echo "→ $$m"; $(MAKE) --no-print-directory -C $$m lint || exit 1; done
 
 .PHONY: fmt
-fmt: ## Format Go source
-	$(GO) fmt $(PKG_ALL)
-	@command -v goimports >/dev/null 2>&1 && goimports -w . || true
+fmt: ## gofmt every module
+	@for m in $(MODULES); do $(MAKE) --no-print-directory -C $$m fmt; done
 
 .PHONY: tidy
-tidy: ## go mod tidy + verify
-	$(GO) mod tidy
-	$(GO) mod verify
+tidy: ## go mod tidy across the workspace
+	go work sync
+	@for m in $(MODULES); do $(MAKE) --no-print-directory -C $$m tidy; done
 
-# ---- CI / PR gate ----
 .PHONY: ci
-ci: tidy fmt lint test ## Full pre-merge gate
-	@echo "✓ CI gate passed"
+ci: ## Full pre-merge gate across all modules
+	@for m in $(MODULES); do echo "→ $$m"; $(MAKE) --no-print-directory -C $$m ci || exit 1; done
+	@echo "✓ monorepo CI gate passed"
 
 .PHONY: pr-ready
-pr-ready: ci ## Alias for ci; run before opening a PR
-	@echo "Ready to open PR."
+pr-ready: ci ## Alias for ci, run before opening a PR
 
-# ---- Release ----
+.PHONY: clean
+clean: ## Clean every module's build artifacts and the top-level dist/
+	@for m in $(MODULES); do $(MAKE) --no-print-directory -C $$m clean || true; done
+	rm -rf dist
+
 .PHONY: release
-release: clean build-all ## Cross-compile binaries + SHA256 sums into dist/
-	@cd $(DIST) && \
-		for f in $(BINARY)-*; do \
-			(shasum -a 256 "$$f" 2>/dev/null || sha256sum "$$f") > "$$f.sha256"; \
-		done
-	@echo "→ release artifacts in $(DIST)/"
-	@ls -lh $(DIST)/
+release: ## Cross-compile every module's release bundle
+	@for m in $(MODULES); do echo "→ $$m"; $(MAKE) --no-print-directory -C $$m release || exit 1; done
 
-# ---- /spawn board helpers ----
+# ---- /spawn board helpers (monorepo-wide) ----
 .PHONY: spawn-available
-spawn-available: ## List Backlog issues (Pipeline lock filter)
+spawn-available: ## List Backlog tasks from the project board (Pipeline lock)
 	@python3 .artifacts/spawn/board.py available -v 2>/dev/null || \
 		echo "board.py not configured (run .artifacts/spawn/setup-project.py first)"
 
@@ -103,7 +70,7 @@ spawn-status: ## Print Pipeline state of an issue: make spawn-status ISSUE=42
 	@python3 .artifacts/spawn/board.py status $(ISSUE)
 
 .PHONY: spawn-claim
-spawn-claim: ## Claim Backlog issue -> In Plan: make spawn-claim ISSUE=42
+spawn-claim: ## Claim Backlog -> In Plan: make spawn-claim ISSUE=42
 	@test -n "$(ISSUE)" || (echo "usage: make spawn-claim ISSUE=<n>" && exit 2)
 	@python3 .artifacts/spawn/board.py claim $(ISSUE)
 
@@ -118,11 +85,6 @@ spawn-release: ## Reset Pipeline to Backlog: make spawn-release ISSUE=42
 	@test -n "$(ISSUE)" || (echo "usage: make spawn-release ISSUE=<n>" && exit 2)
 	@python3 .artifacts/spawn/board.py release $(ISSUE)
 
-# ---- Housekeeping ----
-.PHONY: clean
-clean: ## Remove build artifacts and coverage files
-	rm -rf $(DIST) coverage.out
-
 .PHONY: help
-help: ## List Makefile targets
-	@awk 'BEGIN {FS = ":.*?## "; printf "Targets (run \"make <target>\"):\n\n"} /^[a-zA-Z_-]+:.*?## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST) | sort
+help: ## List monorepo targets
+	@awk 'BEGIN {FS = ":.*?## "; printf "Monorepo targets:\n\n"} /^[a-zA-Z_-]+:.*?## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST) | sort

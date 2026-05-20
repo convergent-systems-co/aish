@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/convergent-systems-co/aish/internal/parser"
+	"github.com/convergent-systems-co/aish/shell/internal/parser"
 )
 
 // requireBinary skips the test if a real binary the integration test depends

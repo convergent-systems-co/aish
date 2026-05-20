@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/convergent-systems-co/aish/internal/shell"
+	"github.com/convergent-systems-co/aish/shell/internal/shell"
 )
 
 // Build-time identity, populated via -ldflags by the Makefile.

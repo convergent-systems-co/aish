@@ -6,7 +6,7 @@ package shell
 import (
 	"io"
 
-	"github.com/convergent-systems-co/aish/internal/env"
+	"github.com/convergent-systems-co/aish/shell/internal/env"
 )
 
 // Shell holds runtime state across REPL iterations: working directory,
