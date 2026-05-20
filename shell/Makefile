@@ -50,6 +50,10 @@ run: build ## Build then run aish (dev iteration)
 test: ## Run all unit tests with race detector
 	$(GO) test $(GOFLAGS) -race -count=1 $(PKG_ALL)
 
+.PHONY: test-integration
+test-integration: ## Run end-to-end integration tests against the aish binary
+	$(GO) test $(GOFLAGS) -race -count=1 ./integration/...
+
 .PHONY: test-cover
 test-cover: ## Run tests with coverage report
 	$(GO) test $(GOFLAGS) -race -count=1 -coverprofile=coverage.out $(PKG_ALL)

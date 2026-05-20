@@ -45,3 +45,7 @@ logs/
 
 # /spawn manifests — restartable state per machine, not source
 .artifacts/**/*-manifest.json
+
+# Build outputs
+dist/
+coverage.out
