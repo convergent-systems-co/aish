@@ -31,6 +31,7 @@ func main() {
 		}
 	}
 	s := shell.New()
+	defer s.Close()
 	if err := s.Run(os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "aish: %v\n", err)
 		os.Exit(1)

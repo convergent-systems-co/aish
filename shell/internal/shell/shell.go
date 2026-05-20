@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
+	"github.com/convergent-systems-co/aish/shell/internal/cache"
 	"github.com/convergent-systems-co/aish/shell/internal/env"
 	"github.com/convergent-systems-co/aish/shell/internal/exec"
 	"github.com/convergent-systems-co/aish/shell/internal/parser"
@@ -32,6 +35,16 @@ type Shell struct {
 	// themes is the registry of available shell brands. Always non-nil
 	// after New() — bundled themes guarantee a usable "default" theme.
 	themes *theme.Registry
+	// cache is the L1 intent cache + (optional) inference plugin handle.
+	// nil when the SQLite store at ~/.aish/cache.db cannot be opened
+	// (read-only home, disk full, etc.) — the shell still runs, just
+	// without the AI-native dispatch tier.
+	cache *cache.Cache
+	// cacheStore + cachePlugin are held separately so Close() can tear
+	// them down explicitly. cache.New takes ownership of these but
+	// doesn't expose a unified Close, so the shell owns the lifecycle.
+	cacheStore  *cache.Store
+	cachePlugin *cache.PluginClient
 }
 
 // New returns a Shell with cwd initialised to the current process working
@@ -64,11 +77,93 @@ func New() *Shell {
 		}
 	}
 
-	return &Shell{
+	s := &Shell{
 		cwd:    cwd,
 		env:    e,
 		themes: reg,
 	}
+
+	// Open the L1 intent cache at ~/.aish/cache.db and (when a bearer
+	// key is set) eagerly start the inference plugin as a child. Any
+	// failure is logged-by-omission — the shell still works without a
+	// cache, just without the AI-native dispatch tier.
+	s.openCache(e)
+
+	return s
+}
+
+// Close releases shell-owned resources (cache DB, plugin child process).
+// Idempotent. Safe to call on a freshly-constructed Shell that never
+// successfully opened a cache.
+func (s *Shell) Close() error {
+	if s == nil {
+		return nil
+	}
+	var firstErr error
+	if s.cachePlugin != nil {
+		if err := s.cachePlugin.Close(); err != nil {
+			firstErr = err
+		}
+		s.cachePlugin = nil
+	}
+	if s.cacheStore != nil {
+		if err := s.cacheStore.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.cacheStore = nil
+	}
+	s.cache = nil
+	return firstErr
+}
+
+// openCache opens ~/.aish/cache.db (creating the directory if needed)
+// and, when a bearer key is present in env, attempts to start the
+// aish-inference-cloud child plugin. On total failure the shell falls
+// back to no-cache mode.
+func (s *Shell) openCache(e *env.Env) {
+	home := homeDir(e)
+	if home == "" {
+		return
+	}
+	dbDir := filepath.Join(home, ".aish")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		return
+	}
+	store, err := cache.Open(filepath.Join(dbDir, "cache.db"))
+	if err != nil {
+		return
+	}
+	s.cacheStore = store
+	s.cachePlugin = tryStartPlugin(e)
+	s.cache = cache.New(store, s.cachePlugin)
+}
+
+// tryStartPlugin spawns the inference plugin when a bearer key is set
+// and the binary resolves on PATH (or via $AISH_INFERENCE_PLUGIN).
+// Returns nil on any startup failure; the cache then runs in lookup-
+// only mode.
+//
+// The plugin defaults to api.convergent-systems.co/llm/v1 (set on the
+// plugin side via DefaultBaseURL). $ANTHROPIC_BASE_URL overrides.
+func tryStartPlugin(e *env.Env) *cache.PluginClient {
+	// Avoid spawning a child that will exit 2 immediately because the
+	// API key isn't set. The plugin reads $ANTHROPIC_API_KEY.
+	if k, _ := e.Get("ANTHROPIC_API_KEY"); k == "" {
+		return nil
+	}
+	binary := ""
+	if v, ok := e.Get("AISH_INFERENCE_PLUGIN"); ok {
+		binary = v
+	}
+	pc, err := cache.Start(cache.PluginConfig{
+		BinaryPath: binary,
+		Env:        e.Environ(),
+		Stderr:     os.Stderr,
+	})
+	if err != nil {
+		return nil
+	}
+	return pc
 }
 
 // Run drives the REPL until stdin closes.
@@ -209,27 +304,62 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		return nil
 	}
 
-	// External command path: expand variables → parse → exec.
+	// Built-in: `cache stats | clear`. Per v0.1-2 acceptance.
+	if line == "cache" || strings.HasPrefix(line, "cache ") || strings.HasPrefix(line, "cache\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "cache"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.cacheBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Dispatch tier 1 — known-binary passthrough. If the first token
+	// resolves on PATH (or via the shell's env override), treat the line
+	// as a literal command. This preserves POSIX behavior for everything
+	// the user expects to "just work" (cat, ls, grep, vim, …) and avoids
+	// paying the cache + plugin round-trip on the hot path.
 	expanded := s.env.Expand(line, s.lastExit)
-	pipeline, parseErr := parser.Parse(expanded)
+	if first := firstToken(expanded); first != "" && isKnownBinary(first, s.env) {
+		return s.runExternal(expanded, stdin, stdout, stderr)
+	}
+
+	// Dispatch tier 2/3 — AI-native: cache lookup → plugin inference →
+	// cache write-back. The raw line (NOT $VAR-expanded) is the intent;
+	// the plugin compiles it to an invocation, which we then run through
+	// the normal external path.
+	if s.cache != nil {
+		invocation, _, err := s.cache.Resolve(context.Background(), line, runtime.GOOS)
+		switch {
+		case err == nil:
+			return s.runExternal(invocation, stdin, stdout, stderr)
+		case errors.Is(err, cache.ErrNoPlugin):
+			// No plugin configured (no API key, no binary on PATH). Fall
+			// through to the legacy parser+exec path so the user sees
+			// the familiar "command not found" exit-127.
+		default:
+			fmt.Fprintf(stderr, "aish: %v\n", err)
+			s.SetLastExit(127)
+			return nil
+		}
+	}
+
+	// Dispatch tier 4 — legacy fallback (parse + exec on $VAR-expanded
+	// text). Yields exit-127 for unrecognised commands.
+	return s.runExternal(expanded, stdin, stdout, stderr)
+}
+
+// runExternal parses cmdline as a pipeline and runs it. Used by both
+// the known-binary tier (with $VAR-expanded text) and the cache tier
+// (with the plugin-compiled invocation).
+func (s *Shell) runExternal(cmdline string, stdin io.Reader, stdout, stderr io.Writer) error {
+	pipeline, parseErr := parser.Parse(cmdline)
 	if parseErr != nil {
 		fmt.Fprintf(stderr, "aish: parse: %v\n", parseErr)
 		s.SetLastExit(2)
 		return nil
 	}
-	// Empty pipeline (whitespace after expansion) is a no-op.
 	if len(pipeline.Commands) == 0 {
 		return nil
 	}
-
-	// exec.Run inherits the shell's env and cwd. The cwd is propagated by
-	// chdir-ing the parent before Start; v0.1-1 keeps it simple by relying
-	// on the process-wide cwd, which Cd has already set via os.Chdir.
-	//
-	// stdin is the same Reader the REPL is reading lines from. Because
-	// Run uses byte-by-byte reads (no prefetch), unread bytes are still
-	// pending on the underlying stream — external children like `cat`
-	// see them as their own input. See issue #167.
 	exitCode, runErr := exec.Run(
 		context.Background(),
 		pipeline,
@@ -240,11 +370,48 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 	)
 	if runErr != nil {
 		fmt.Fprintf(stderr, "aish: %v\n", runErr)
-		s.SetLastExit(127) // POSIX convention for "command not found / not runnable"
+		s.SetLastExit(127)
 		return nil
 	}
 	s.SetLastExit(exitCode)
 	return nil
+}
+
+// firstToken returns the first whitespace-separated token of line.
+// Used to peek at "is this command a known binary?" without paying a
+// full parser.Parse — the tokenization here is lossy on purpose
+// (single-quoted strings, redirects, etc. are not respected).
+func firstToken(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	for i, r := range line {
+		if r == ' ' || r == '\t' {
+			return line[:i]
+		}
+	}
+	return line
+}
+
+// isKnownBinary returns true when tok resolves to an executable on the
+// shell's $PATH. Uses os/exec.LookPath after pivoting through the
+// shell's env so an in-process `export PATH=...` is honored.
+func isKnownBinary(tok string, e *env.Env) bool {
+	// Absolute / relative paths bypass PATH lookup.
+	if strings.ContainsAny(tok, "/\\") {
+		_, err := os.Stat(tok)
+		return err == nil
+	}
+	// Pivot $PATH through the shell env so the lookup matches what an
+	// actual exec would resolve to.
+	pathBefore := os.Getenv("PATH")
+	if p, ok := e.Get("PATH"); ok {
+		_ = os.Setenv("PATH", p)
+		defer os.Setenv("PATH", pathBefore)
+	}
+	_, err := osexec.LookPath(tok)
+	return err == nil
 }
 
 // Cwd returns the shell's current working directory.
