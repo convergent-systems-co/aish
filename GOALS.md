@@ -968,6 +968,32 @@ At end of 90 days, the team reviews:
 
 -----
 
+### Epic v0.3-5 — Persona Engine (Embedded Personality)
+
+> The shell embodies a personality. Voice, tone, prompt segments, and AI-mediated responses reflect the active persona. Distinct from the identity engine (v0.3-3): identity answers *who you are*; persona answers *who the shell is being for you*. A `work` identity can pair with any persona — `mentor`, `terse-veteran`, `playful`, `default`.
+
+A persona is a typed character: voice description, system-prompt template injected into inference requests, tone parameters, prompt segment overrides, and optional identity bindings. Personas are reversible (active persona is a signed history event), shareable as bundles, and ship with sane defaults.
+
+- [ ] Persona schema (`personas/<name>.toml` — voice, system prompt, tone parameters, prompt overrides)
+- [ ] Persona storage at `~/.aish/personas/`
+- [ ] Built-in starter personas: `default`, `mentor`, `terse-veteran`, `playful`
+- [ ] `aish persona use <name>` — activate; signed history event
+- [ ] `aish persona list` — installed personas
+- [ ] `aish persona show <name>` — inspect schema and bindings
+- [ ] `aish persona create <name>` — guided bootstrap
+- [ ] Inference plugin contract extension — persona context in `infer` request params
+- [ ] System-prompt injection that shapes AI tone without bypassing safety
+- [ ] Prompt segment overrides — greeting glyph, voice phrase, accent character
+- [ ] History events record active persona at command time
+- [ ] Persona persistence in `~/.aish/config.toml`
+- [ ] Persona bundle format for sharing (signed, versioned, community-installable)
+- [ ] Optional identity-persona binding (`aish identity use work --persona mentor`)
+- [ ] Safety floor — personas MUST NOT bypass vendor safety policy, secret-handling, or destructive-action gates
+
+**Risk:** Medium. Novel surface. The plugin contract extension coordinates with v0.1-3 and v0.3-2; the safety floor is non-negotiable.
+
+-----
+
 ## v1.0 — Windows Native (120 days)
 
 **Goal:** the differentiation play. Make Windows a first-class developer platform without WSL.
