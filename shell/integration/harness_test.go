@@ -3,6 +3,7 @@ package integration
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,22 +67,46 @@ func run(t *testing.T, input string, args ...string) *session {
 
 // runWithEnv is like run but lets the test override the environment.
 // Passing nil for env inherits the parent's env unchanged.
+//
+// stdin is delivered via a real OS pipe so the aish process sees an
+// *os.File on fd 0. Critical: when aish spawns a child and assigns
+// cmd.Stdin to its own stdin (which is *os.File), os/exec dup2's the
+// fd directly into the child WITHOUT spawning a goroutine to copy
+// bytes. A goroutine would drain the source aggressively and break
+// the issue-#167 contract that subsequent lines remain available for
+// `cat`, `head`, and other stdin readers. A strings.Reader here would
+// force os/exec into goroutine mode and the tests would not match
+// production semantics.
 func runWithEnv(t *testing.T, input string, env []string, args ...string) *session {
 	t.Helper()
 
 	cmd := exec.Command(binaryPath, args...)
-	cmd.Stdin = strings.NewReader(input)
 	if env != nil {
 		cmd.Env = env
 	}
+
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("integration: os.Pipe for stdin: %v", err)
+	}
+	defer stdinR.Close()
+	cmd.Stdin = stdinR
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
+		_ = stdinW.Close()
 		t.Fatalf("integration: failed to start aish: %v", err)
 	}
+
+	// Feed scripted input through the pipe, then close the write end so
+	// aish sees EOF on stdin and exits the REPL cleanly.
+	go func() {
+		_, _ = io.WriteString(stdinW, input)
+		_ = stdinW.Close()
+	}()
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
