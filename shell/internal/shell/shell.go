@@ -13,10 +13,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/convergent-systems-co/aish/shell/internal/cache"
 	"github.com/convergent-systems-co/aish/shell/internal/env"
 	"github.com/convergent-systems-co/aish/shell/internal/exec"
+	"github.com/convergent-systems-co/aish/shell/internal/history"
 	"github.com/convergent-systems-co/aish/shell/internal/parser"
 	"github.com/convergent-systems-co/aish/shell/internal/theme"
 )
@@ -45,6 +47,16 @@ type Shell struct {
 	// doesn't expose a unified Close, so the shell owns the lifecycle.
 	cacheStore  *cache.Store
 	cachePlugin *cache.PluginClient
+	// history is the v0.1-4 reversibility interceptor — wraps the
+	// event log + snapshotter. nil when ~/.aish is unwritable; the
+	// shell still runs but every destructive command is permanent
+	// (degrades gracefully per the same pattern as the cache).
+	history *history.History
+	// interceptors is the registered set of PreCommand/PostCommand
+	// observers. History registers as one entry; telemetry (v0.1-5,
+	// TL2) will register a second. Order is insertion order for
+	// Before; reverse for After (see interceptor.go).
+	interceptors []Interceptor
 }
 
 // New returns a Shell with cwd initialised to the current process working
@@ -89,12 +101,17 @@ func New() *Shell {
 	// cache, just without the AI-native dispatch tier.
 	s.openCache(e)
 
+	// Open the v0.1-4 history engine (event log + snapshotter). On
+	// failure, s.history stays nil and `undo` / `restore` will print
+	// "history not available" — the shell keeps running.
+	s.openHistory(e)
+
 	return s
 }
 
-// Close releases shell-owned resources (cache DB, plugin child process).
-// Idempotent. Safe to call on a freshly-constructed Shell that never
-// successfully opened a cache.
+// Close releases shell-owned resources (cache DB, plugin child process,
+// history DB). Idempotent. Safe to call on a freshly-constructed Shell
+// that never successfully opened a cache or history.
 func (s *Shell) Close() error {
 	if s == nil {
 		return nil
@@ -113,6 +130,13 @@ func (s *Shell) Close() error {
 		s.cacheStore = nil
 	}
 	s.cache = nil
+	if s.history != nil {
+		if err := s.history.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.history = nil
+	}
+	s.interceptors = nil
 	return firstErr
 }
 
@@ -136,6 +160,37 @@ func (s *Shell) openCache(e *env.Env) {
 	s.cacheStore = store
 	s.cachePlugin = tryStartPlugin(e)
 	s.cache = cache.New(store, s.cachePlugin)
+}
+
+// openHistory opens ~/.aish/history.db (creating the directory if
+// needed) and wires the history.History interceptor onto the Shell's
+// interceptor slice. On any failure the shell falls back to no-history
+// mode — `undo` / `restore` will print "history not available" and
+// every destructive command runs unobserved (POSIX-default behavior).
+func (s *Shell) openHistory(e *env.Env) {
+	home := homeDir(e)
+	if home == "" {
+		return
+	}
+	dotAish := filepath.Join(home, ".aish")
+	if err := os.MkdirAll(dotAish, 0o755); err != nil {
+		return
+	}
+	store, err := history.Open(filepath.Join(dotAish, "history.db"))
+	if err != nil {
+		return
+	}
+	cfg := history.LoadConfig(dotAish)
+	snapRoot := filepath.Join(dotAish, "snapshots")
+	sn := history.NewSnapshotter(snapRoot, cfg.SnapshotMaxBytes, history.DefaultIgnoreMatcher())
+	h := history.NewHistory(store, sn)
+	if h == nil {
+		_ = store.Close()
+		return
+	}
+	h.SetCwdFn(func() string { return s.cwd })
+	s.history = h
+	s.interceptors = append(s.interceptors, h)
 }
 
 // tryStartPlugin spawns the inference plugin when a bearer key is set
@@ -312,6 +367,22 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		return nil
 	}
 
+	// Built-in: `undo` and `restore <path>`. Per v0.1-4 acceptance
+	// (#35, #36). These are intentionally bare-word built-ins (not
+	// prefixed with `aish`) so the viral demo reads as one keystroke.
+	if line == "undo" || strings.HasPrefix(line, "undo ") || strings.HasPrefix(line, "undo\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "undo"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.undoBuiltin(args, stdout, stderr))
+		return nil
+	}
+	if strings.HasPrefix(line, "restore ") || strings.HasPrefix(line, "restore\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "restore"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.restoreBuiltin(args, stdout, stderr))
+		return nil
+	}
+
 	// Dispatch tier 1 — known-binary passthrough. If the first token
 	// resolves on PATH (or via the shell's env override), treat the line
 	// as a literal command. This preserves POSIX behavior for everything
@@ -350,6 +421,13 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 // runExternal parses cmdline as a pipeline and runs it. Used by both
 // the known-binary tier (with $VAR-expanded text) and the cache tier
 // (with the plugin-compiled invocation).
+//
+// Interceptor seam (v0.1-4): each registered Interceptor.Before fires
+// just before exec.Run, in registration order. After fires immediately
+// post-exec in REVERSE order so the last-registered observer sees the
+// state produced by earlier observers. A Before error is logged to
+// stderr but does NOT abort the command — "snapshot is best-effort,
+// command is mandatory."
 func (s *Shell) runExternal(cmdline string, stdin io.Reader, stdout, stderr io.Writer) error {
 	pipeline, parseErr := parser.Parse(cmdline)
 	if parseErr != nil {
@@ -360,6 +438,12 @@ func (s *Shell) runExternal(cmdline string, stdin io.Reader, stdout, stderr io.W
 	if len(pipeline.Commands) == 0 {
 		return nil
 	}
+	for _, ic := range s.interceptors {
+		if err := ic.Before(&pipeline, cmdline); err != nil {
+			fmt.Fprintf(stderr, "aish: interceptor: %v\n", err)
+		}
+	}
+	start := time.Now()
 	exitCode, runErr := exec.Run(
 		context.Background(),
 		pipeline,
@@ -368,12 +452,17 @@ func (s *Shell) runExternal(cmdline string, stdin io.Reader, stdout, stderr io.W
 		stdout,
 		stderr,
 	)
+	dur := time.Since(start)
+	finalExit := exitCode
 	if runErr != nil {
 		fmt.Fprintf(stderr, "aish: %v\n", runErr)
-		s.SetLastExit(127)
-		return nil
+		finalExit = 127
 	}
-	s.SetLastExit(exitCode)
+	// Reverse order — see contract on Interceptor.
+	for i := len(s.interceptors) - 1; i >= 0; i-- {
+		s.interceptors[i].After(&pipeline, cmdline, finalExit, dur)
+	}
+	s.SetLastExit(finalExit)
 	return nil
 }
 

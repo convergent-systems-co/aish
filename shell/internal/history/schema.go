@@ -4,13 +4,13 @@ package history
 //
 // Two tables:
 //
-//   events    — one row per shell command that produced a recorded
-//               event. `payload` is the JSON-encoded Event (so future
-//               schema growth — new Affected fields, signature, etc. —
-//               does not require an ALTER TABLE).
-//   snapshots — one row per file actually copied to disk. The unique
-//               index on (path, ts) gives SnapshotsForPath its
-//               most-recent-wins behavior.
+//	events    — one row per shell command that produced a recorded
+//	            event. `payload` is the JSON-encoded Event (so future
+//	            schema growth — new Affected fields, signature, etc. —
+//	            does not require an ALTER TABLE).
+//	snapshots — one row per file actually copied to disk. The unique
+//	            index on (path, ts) gives SnapshotsForPath its
+//	            most-recent-wins behavior.
 //
 // Append-only by convention: the only UPDATE statement in store.go
 // touches events.exit_code + events.duration_ms (the Finalize call
