@@ -168,6 +168,55 @@ func TestExpandTable(t *testing.T) {
 			input: "$A and $B",
 			want:  "1 and 2",
 		},
+		// --- Quote-aware expansion (issue #163) ---
+		{
+			name:  "single quotes suppress dollar expansion",
+			setup: map[string]string{"X": "expanded"},
+			input: "'literal $X'",
+			want:  "'literal $X'",
+		},
+		{
+			name:  "single quotes suppress braced expansion",
+			setup: map[string]string{"X": "expanded"},
+			input: "'literal ${X}'",
+			want:  "'literal ${X}'",
+		},
+		{
+			name:     "single quotes suppress dollar-question",
+			input:    "'code=$?'",
+			lastExit: 42,
+			want:     "'code=$?'",
+		},
+		{
+			name:  "double quotes still expand",
+			setup: map[string]string{"X": "expanded"},
+			input: `"value=$X"`,
+			want:  `"value=expanded"`,
+		},
+		{
+			name:  "double quote inside single is literal",
+			setup: map[string]string{"X": "expanded"},
+			input: `'has " inside $X'`,
+			want:  `'has " inside $X'`,
+		},
+		{
+			name:  "single quote inside double is literal",
+			setup: map[string]string{"X": "expanded"},
+			input: `"has ' inside $X"`,
+			want:  `"has ' inside expanded"`,
+		},
+		{
+			name:  "expansion outside quotes still works",
+			setup: map[string]string{"X": "expanded"},
+			input: "before $X 'middle $X' after $X",
+			want:  "before expanded 'middle $X' after expanded",
+		},
+		{
+			name:  "adjacent single-quoted segments",
+			setup: map[string]string{"X": "expanded"},
+			input: "'a''b'$X",
+			want:  "'a''b'expanded",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

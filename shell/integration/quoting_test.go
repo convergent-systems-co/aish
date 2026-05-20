@@ -37,11 +37,8 @@ func TestDoubleQuoteWithDollarExpansion(t *testing.T) {
 }
 
 // TestSingleQuoteNoExpansion — `'$X'` is literal. Belt-and-suspenders
-// with the expansion test of the same name.
-//
-// SKIPPED pending fix for #163: see expansion_test.go for context.
+// with the expansion test of the same name. Fixed by #163.
 func TestSingleQuoteNoExpansion(t *testing.T) {
-	t.Skip("known defect: see https://github.com/convergent-systems-co/aish/issues/163")
 	requireBinary(t, "echo")
 	s := run(t, script(`export X=expanded`, `echo 'literal $X'`))
 	s.assertExit(0)
