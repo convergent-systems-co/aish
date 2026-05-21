@@ -460,3 +460,10 @@ func localFree(p unsafe.Pointer) {
 func OpenDarwinBackend(prefix string, entropy []byte) (Backend, error) {
 	return nil, ErrUnsupported
 }
+
+// OpenLinuxBackend on Windows returns ErrUnsupported. The Linux
+// backend's real impl is in backend_linux.go (build:linux); this
+// stub lets dispatch code reference the symbol on Windows builds.
+func OpenLinuxBackend(prefix string, entropy []byte) (Backend, error) {
+	return nil, ErrUnsupported
+}

@@ -415,3 +415,10 @@ func isNotFound(err error) bool {
 func OpenWindowsBackend(prefix string, entropy []byte) (Backend, error) {
 	return nil, ErrUnsupported
 }
+
+// OpenLinuxBackend on darwin returns ErrUnsupported. The Linux
+// backend's real impl is in backend_linux.go (build:linux); this
+// stub lets dispatch code reference the symbol on darwin builds.
+func OpenLinuxBackend(prefix string, entropy []byte) (Backend, error) {
+	return nil, ErrUnsupported
+}
