@@ -59,6 +59,27 @@ clean: ## Clean every module's build artifacts and the top-level dist/
 release: ## Cross-compile every module's release bundle
 	@for m in $(MODULES); do echo "→ $$m"; $(MAKE) --no-print-directory -C $$m release || exit 1; done
 
+# ---- v0.2-3 community-cache bundle ----
+BUNDLE_DIR     := dist/community
+BUNDLE_VERSION ?= 1
+
+.PHONY: bundle
+bundle: ## Build + sign the v0.2-3 community-cache bundle from data/community/seed.jsonl
+	@echo "→ building community-cache bundle v$(BUNDLE_VERSION)"
+	@mkdir -p $(BUNDLE_DIR)
+	@cd shell && go run ./cmd/aish-community build \
+		-seed ../data/community/seed.jsonl \
+		-out ../$(BUNDLE_DIR) \
+		-trust-anchors ../data/community/trust-anchors.toml \
+		-version $(BUNDLE_VERSION)
+	@echo "→ packaging tarball"
+	@tar -C $(BUNDLE_DIR) -czf $(BUNDLE_DIR)/aish-community-bundle-v$(BUNDLE_VERSION).tar.gz \
+		manifest.json bundle.db trust-anchors.toml
+	@(cd $(BUNDLE_DIR) && (shasum -a 256 aish-community-bundle-v$(BUNDLE_VERSION).tar.gz 2>/dev/null || \
+		sha256sum aish-community-bundle-v$(BUNDLE_VERSION).tar.gz) > aish-community-bundle-v$(BUNDLE_VERSION).tar.gz.sha256)
+	@echo "→ bundle artifacts in $(BUNDLE_DIR)/"
+	@ls -lh $(BUNDLE_DIR)/
+
 # ---- /spawn board helpers (monorepo-wide) ----
 .PHONY: spawn-available
 spawn-available: ## List Backlog tasks from the project board (Pipeline lock)

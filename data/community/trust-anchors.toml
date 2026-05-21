@@ -1,0 +1,15 @@
+# aish community-cache trust anchors.
+#
+# This file is the HUMAN-READABLE copy of the trust anchors compiled
+# into aish at build time. The runtime does NOT consult this file —
+# the compiled-in list in shell/internal/cache/community/trust.go is
+# the trust boundary.
+#
+# Rotation MUST land via PR + new aish release.
+
+[[anchor]]
+signer_id    = "aish-dev"
+public_key   = "3d5b25c2999cd2b9717bf4dd23a23d84050957fda80c968a91edeaf14e07f496"
+algorithm    = "ed25519"
+revoked      = false
+notes        = "Development-only signing key used by tests + make bundle. NOT for production use."

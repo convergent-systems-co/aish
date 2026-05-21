@@ -8,6 +8,14 @@ import (
 	proto "github.com/convergent-systems-co/aish/libs/proto/inference"
 )
 
+// CommunityLookup is the contract Cache uses to consult an opened
+// L3 community bundle. *community.Bundle satisfies this interface;
+// expressed here so tests can substitute fakes without spinning up a
+// signed bundle on disk.
+type CommunityLookup interface {
+	Lookup(intent, os string) (string, bool, error)
+}
+
 // ErrNoPlugin is returned by Resolve when the cache misses and no
 // PluginClient is configured. The shell dispatch loop treats this as a
 // "command not found"-style condition: aish has nothing in cache and
@@ -32,6 +40,7 @@ var ErrNoPlugin = errors.New("cache: no inference plugin configured")
 type Cache struct {
 	store               *Store
 	plugin              *PluginClient
+	community           CommunityLookup
 	similarityThreshold float64
 }
 
@@ -77,6 +86,44 @@ func (c *Cache) SimilarityThreshold() float64 {
 	return c.similarityThreshold
 }
 
+// WithCommunityBundle attaches an L3 community bundle that Resolve
+// will consult on every L1 miss BEFORE walking the inference plugin.
+// Pass nil to detach. Returns the receiver for chaining.
+//
+// The bundle is consulted read-only; on an L3 hit the row is promoted
+// to L1 with source=SourceCommunity so subsequent calls land on the
+// existing exact-hash path. L1 takes priority over L3 — an
+// already-resolved intent in L1 never goes near the community bundle.
+func (c *Cache) WithCommunityBundle(b CommunityLookup) *Cache {
+	if c == nil {
+		return nil
+	}
+	c.community = b
+	return c
+}
+
+// CommunityBundle returns the attached community-bundle lookup, if
+// any. Exposed so the `aish community info` built-in can report
+// whether the L3 tier is wired without reaching past the cache.
+func (c *Cache) CommunityBundle() CommunityLookup {
+	if c == nil {
+		return nil
+	}
+	return c.community
+}
+
+// promoteFromCommunity writes a community-bundle row into L1 with
+// source=SourceCommunity. Called inline from Resolve on an L3 hit so
+// the next call for the same intent lands on the existing
+// exact-hash path. Returns the underlying Store.WriteWithSource
+// error unchanged.
+func (c *Cache) promoteFromCommunity(intent, os, invocation string) error {
+	if c == nil || c.store == nil {
+		return errors.New("cache: promoteFromCommunity: nil store")
+	}
+	return c.store.WriteWithSource(intent, os, invocation, 1.0, nil, SourceCommunity)
+}
+
 // Resolve compiles `intent` for `os` to a shell-ready invocation,
 // preferring the local cache before falling back to the inference
 // plugin.
@@ -112,12 +159,31 @@ func (c *Cache) Resolve(ctx context.Context, intent, os string) (string, bool, e
 	}
 
 	// Tier 1 — exact-hash cache hit takes priority. Same path as v0.1-2.
+	// L1 wins over L3 by construction: an intent already present in
+	// L1 (whether plugin-sourced or previously promoted from
+	// community) never re-consults the bundle.
 	invocation, hit, err := c.store.Lookup(intent, os)
 	if err != nil {
 		return "", false, fmt.Errorf("cache: Resolve: lookup: %w", err)
 	}
 	if hit {
 		return invocation, true, nil
+	}
+
+	// Tier 1.5 — L3 community bundle. Read-only signed corpus that
+	// pre-populates the cache for fresh installs. On hit, promote
+	// the row to L1 with source=SourceCommunity so subsequent calls
+	// land on the existing exact-hash path. Best-effort: any L3
+	// error falls through to the plugin path so the bundle never
+	// degrades v0.1-2 behaviour.
+	if c.community != nil {
+		l3Invocation, l3Hit, l3Err := c.community.Lookup(intent, os)
+		if l3Err == nil && l3Hit {
+			if werr := c.promoteFromCommunity(intent, os, l3Invocation); werr != nil {
+				return "", false, fmt.Errorf("cache: Resolve: community promote: %w", werr)
+			}
+			return l3Invocation, true, nil
+		}
 	}
 
 	if c.plugin == nil {

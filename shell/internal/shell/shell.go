@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/convergent-systems-co/aish/shell/internal/cache"
+	"github.com/convergent-systems-co/aish/shell/internal/cache/community"
 	"github.com/convergent-systems-co/aish/shell/internal/env"
 	"github.com/convergent-systems-co/aish/shell/internal/history"
 	"github.com/convergent-systems-co/aish/shell/internal/parser"
@@ -58,6 +59,11 @@ type Shell struct {
 	// ~/.aish is unwritable; `aish stats` then prints "telemetry
 	// not available."
 	telemetry *telemetry.Recorder
+	// community is the v0.2-3 L3 community-cache bundle. nil when
+	// no bundle is installed or available on disk; `aish community
+	// info` then reports "not loaded". The cache's L3 wire-up
+	// (Cache.WithCommunityBundle) is set whenever this is non-nil.
+	community *community.Bundle
 	// interceptors is the registered set of PreCommand/PostCommand
 	// observers. History registers as one entry; telemetry (v0.1-5)
 	// registers a second. Order is insertion order for Before;
@@ -117,6 +123,12 @@ func New() *Shell {
 	// available" — the shell keeps running.
 	s.openTelemetry(e)
 
+	// Open the v0.2-3 community-cache bundle. On failure (no
+	// bundle on disk, verification failure, etc.) s.community stays
+	// nil and `aish community info` prints "not loaded" — the
+	// shell keeps running with just the v0.1-2 L1 cache.
+	s.openCommunity(os.Stderr)
+
 	return s
 }
 
@@ -152,6 +164,12 @@ func (s *Shell) Close() error {
 			firstErr = err
 		}
 		s.telemetry = nil
+	}
+	if s.community != nil {
+		if err := s.community.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.community = nil
 	}
 	s.interceptors = nil
 	return firstErr
@@ -442,7 +460,7 @@ func (s *Shell) newCompleter() term.Completer {
 // depend on shell's dispatch internals.
 func (s *Shell) ResolveTier(firstToken string) term.Tier {
 	switch firstToken {
-	case "cd", "export", "theme", "cache", "stats", "undo", "restore",
+	case "cd", "export", "theme", "cache", "community", "stats", "undo", "restore",
 		"run", "explain", "migrate":
 		return term.TierBuiltin
 	}
@@ -551,6 +569,15 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		rest := strings.TrimSpace(strings.TrimPrefix(line, "cache"))
 		args := strings.Fields(rest)
 		s.SetLastExit(s.cacheBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `community info | status | install | refresh |
+	// contribute`. Per v0.2-3 acceptance (#58–#63).
+	if line == "community" || strings.HasPrefix(line, "community ") || strings.HasPrefix(line, "community\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "community"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.communityBuiltin(args, stdout, stderr))
 		return nil
 	}
 
