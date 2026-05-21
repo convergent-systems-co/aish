@@ -1,0 +1,71 @@
+# Build and deploy the aish documentation site to GitHub Pages.
+#
+# Trigger: any push to main that touches docs/, plus manual dispatch.
+# Build: official `actions/jekyll-build-pages` against `./docs`.
+# Deploy: `actions/deploy-pages` to the `github-pages` environment.
+#
+# Configure once in repo Settings:
+#   Settings -> Pages -> Build and deployment -> Source: GitHub Actions
+#
+# Public URL after first successful deploy:
+#   https://convergent-systems-co.github.io/aish/
+#
+# Security: no `run:` step interpolates user-controlled input
+# (issue titles, PR bodies, etc). The workflow uses only official
+# actions whose inputs are repo-controlled, so the standard
+# command-injection guidance does not apply here.
+
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+# Grant the workflow the OIDC + Pages-write permissions the
+# official deploy action requires; everything else stays at the
+# repo default (read-only).
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deploy. New runs cancel pending ones
+# so a rapid sequence of doc pushes only deploys the most recent.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Build with Jekyll
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./docs
+          destination: ./_site
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
