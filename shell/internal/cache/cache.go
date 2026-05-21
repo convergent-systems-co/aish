@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	proto "github.com/convergent-systems-co/aish/libs/proto/inference"
 )
 
 // ErrNoPlugin is returned by Resolve when the cache misses and no
@@ -127,8 +129,19 @@ func (c *Cache) Resolve(ctx context.Context, intent, os string) (string, bool, e
 	// rather than failing the whole Resolve. We capture the query
 	// vector here so it can be persisted with the freshly-inferred
 	// invocation in tier 3 — saves a second Embed call.
+	//
+	// Special case: when the plugin signals that its gateway does not
+	// implement embeddings (proto.ErrEmbedNotImplemented sentinel —
+	// see #178), there is no point retrying on every Resolve. We treat
+	// it the same as a soft Embed error (skip the similarity branch)
+	// and the queryVector stays nil — write-back in tier 3 records the
+	// row without an embedding, which is the documented v0.1-2 "no
+	// embedding for this row" path.
 	queryVector, embErr := c.plugin.Embed(ctx, intent)
-	if embErr == nil && len(queryVector) > 0 {
+	if errors.Is(embErr, proto.ErrEmbedNotImplemented) {
+		// Explicit no-op: skip similarity, fall straight through to Infer.
+		queryVector = nil
+	} else if embErr == nil && len(queryVector) > 0 {
 		_, simInvocation, _, simHit, simErr := c.store.LookupNearest(queryVector, c.similarityThreshold, os)
 		if simErr == nil && simHit {
 			// Promote the similarity hit to an exact-hash hit for next
