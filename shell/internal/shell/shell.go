@@ -20,6 +20,7 @@ import (
 	"github.com/convergent-systems-co/aish/shell/internal/history"
 	"github.com/convergent-systems-co/aish/shell/internal/parser"
 	"github.com/convergent-systems-co/aish/shell/internal/telemetry"
+	"github.com/convergent-systems-co/aish/shell/internal/term"
 	"github.com/convergent-systems-co/aish/shell/internal/theme"
 )
 
@@ -304,6 +305,23 @@ func tryStartPlugin(e *env.Env) *cache.PluginClient {
 //
 // Returns nil on clean EOF, non-nil on unrecoverable stdin I/O failures.
 func (s *Shell) Run(stdin io.Reader, stdout, stderr io.Writer) error {
+	if term.IsTTY(stdin) {
+		// stdin is a real terminal — dispatch to the v0.2-1 line editor.
+		// Falls through to the byte-by-byte path on any setup failure so
+		// the user never gets stuck without a prompt.
+		if err := s.runTTY(stdin, stdout, stderr); err == nil {
+			return nil
+		}
+		// fallthrough: best-effort.
+	}
+	return s.runStream(stdin, stdout, stderr)
+}
+
+// runStream is the pre-v0.2-1 byte-by-byte REPL. Used unchanged when
+// stdin is a script / pipe / non-TTY reader. This is the path the
+// issue-#167 regression seatbelt (TestCatConsumesPipedStdin) covers —
+// touching it requires a separate plan.
+func (s *Shell) runStream(stdin io.Reader, stdout, stderr io.Writer) error {
 	for {
 		// Render the prompt before each read so an interactive user sees it.
 		// Errors writing the prompt are non-fatal — a piped stdin/stdout
@@ -332,6 +350,105 @@ func (s *Shell) Run(stdin io.Reader, stdout, stderr io.Writer) error {
 			return fmt.Errorf("read input: %w", readErr)
 		}
 	}
+}
+
+// runTTY drives the v0.2-1 interactive line editor.
+//
+// Invariant: this function is only entered when term.IsTTY(stdin) was
+// true. The editor allocates a RawTerminal on stdin; failure to enter
+// raw mode causes the caller (Run) to fall through to the byte-by-byte
+// path.
+//
+// The editor's history source is a session-local MemorySource — disk
+// history.Store isn't wired in v0.2-1 (it lives in a partition-locked
+// package; see the plan's "Backward compatibility" section).
+func (s *Shell) runTTY(stdin io.Reader, stdout, stderr io.Writer) error {
+	f, ok := stdin.(*os.File)
+	if !ok {
+		return errors.New("shell: TTY editor requires *os.File stdin")
+	}
+	rt, err := term.NewRawTerminal(f)
+	if err != nil {
+		return err
+	}
+	history := term.NewMemorySource(nil)
+	// Build the completer once; cwd + PATH are read live each ReadLine
+	// so a `cd` between prompts is reflected on the next Tab.
+	editor := term.NewEditor(term.Config{
+		Stdin:     stdin,
+		Stdout:    stdout,
+		Prompt:    s.Prompt,
+		History:   history,
+		Resolver:  s,
+		Completer: s.newCompleter(),
+		RawTerm:   rt,
+	})
+	for {
+		line, err := editor.ReadLine(context.Background())
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if errors.Is(err, term.ErrInterrupt) {
+			s.SetLastExit(130)
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read input: %w", err)
+		}
+		// Re-bind the editor's completer if the cwd has changed — the
+		// completer captures cwd at construction.
+		editor = term.NewEditor(term.Config{
+			Stdin:     stdin,
+			Stdout:    stdout,
+			Prompt:    s.Prompt,
+			History:   history,
+			Resolver:  s,
+			Completer: s.newCompleter(),
+			RawTerm:   rt,
+		})
+		trimmed := strings.TrimRight(line, "\r\n")
+		if trimmed == "" {
+			continue
+		}
+		history.Append(trimmed)
+		if dispatchErr := s.dispatch(trimmed, stdin, stdout, stderr); dispatchErr != nil {
+			return dispatchErr
+		}
+	}
+}
+
+// newCompleter builds the production tab-completer for the current
+// shell state: aish built-ins + $PATH binaries + filesystem paths
+// rooted at the shell's cwd. Read lazily so a `cd` in the REPL
+// updates the next ReadLine's completer.
+func (s *Shell) newCompleter() term.Completer {
+	pathDirs := []string{}
+	if p, ok := s.env.Get("PATH"); ok {
+		for _, d := range filepath.SplitList(p) {
+			if d == "" {
+				continue
+			}
+			pathDirs = append(pathDirs, d)
+		}
+	}
+	return term.NewDefaultCompleter(s.cwd, pathDirs)
+}
+
+// ResolveTier classifies the first token of an input line for the
+// term package's syntax highlighter. Matches dispatch's decision tree:
+// built-in names win, then known-binary lookup, then AI-intent.
+//
+// This satisfies term.TierResolver without making the term package
+// depend on shell's dispatch internals.
+func (s *Shell) ResolveTier(firstToken string) term.Tier {
+	switch firstToken {
+	case "cd", "export", "theme", "cache", "stats", "undo", "restore":
+		return term.TierBuiltin
+	}
+	if isKnownBinary(firstToken, s.env) {
+		return term.TierKnownBinary
+	}
+	return term.TierAIIntent
 }
 
 // readLine reads from r byte-by-byte until it sees `\n` or hits EOF. The
