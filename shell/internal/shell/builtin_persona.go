@@ -129,6 +129,14 @@ func (s *Shell) personaShow(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  refuse_when_no_files_provided:        %t\n", p.CapabilityGates.RefuseWhenNoFilesProvided)
 	fmt.Fprintf(stdout, "  refuse_to_write_code:                 %t\n", p.CapabilityGates.RefuseToWriteCode)
 	fmt.Fprintf(stdout, "  no_direct_answers_to_ambiguous_intents: %t\n", p.CapabilityGates.NoDirectAnswersToAmbiguousIntents)
+	// v0.3-5.1 (#124): surface prompt overrides so the user sees what the
+	// theme's "persona" segment would render. The shell renders
+	// greeting_glyph today; voice_phrase / accent_char are display-only
+	// until the proto extension lands.
+	fmt.Fprintf(stdout, "prompt overrides:\n")
+	fmt.Fprintf(stdout, "  greeting_glyph: %q\n", p.PromptOverrides.GreetingGlyph)
+	fmt.Fprintf(stdout, "  voice_phrase:   %q\n", p.PromptOverrides.VoicePhrase)
+	fmt.Fprintf(stdout, "  accent_char:    %q\n", p.PromptOverrides.AccentChar)
 	fmt.Fprintln(stdout, "system_prompt:")
 	for _, line := range strings.Split(strings.TrimRight(p.SystemPrompt, "\n"), "\n") {
 		fmt.Fprintf(stdout, "  %s\n", line)

@@ -298,3 +298,74 @@ func TestRenderPromptBody_EmptySegmentsFallsBackToCwd(t *testing.T) {
 		t.Errorf("missing segments should default to cwd; got %q", body)
 	}
 }
+
+// ---------- renderPersona (v0.3-5.1 #124) ----------
+
+func TestRenderPersona_NoLoaderIsEmpty(t *testing.T) {
+	// Shell built without a HOME or with a torched loader returns "".
+	s := &Shell{}
+	tm := makeTheme(t, []string{"persona"})
+	if got := s.renderPersona(tm); got != "" {
+		t.Errorf("renderPersona without loader = %q; want empty", got)
+	}
+}
+
+func TestRenderPersona_GlyphRendersWithAccentColor(t *testing.T) {
+	// HOME with a user persona that declares a non-empty
+	// greeting_glyph. The segment renders that glyph painted with the
+	// theme's accent colour.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	personasDir := filepath.Join(home, ".aish", "personas")
+	if err := os.MkdirAll(personasDir, 0o700); err != nil {
+		t.Fatalf("mkdir personas: %v", err)
+	}
+	body := `
+name = "glyphy"
+version = 1
+description = "test persona with a glyph"
+voice = "test"
+system_prompt = "you are a test"
+
+[tone]
+verbosity = "medium"
+formality = "neutral"
+emoji = false
+
+[capability_gates]
+
+[prompt_overrides]
+greeting_glyph = "✦"
+voice_phrase = ""
+accent_char = ""
+`
+	if err := os.WriteFile(filepath.Join(personasDir, "glyphy.toml"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write persona: %v", err)
+	}
+	s := New()
+	// Force the loader to pick up the new persona.
+	if _, ok := s.personas.Get("glyphy"); !ok {
+		t.Fatalf("loader did not pick up glyphy persona")
+	}
+	s.activePersona = "glyphy"
+
+	tm := makeTheme(t, []string{"persona"})
+	out := s.renderPersona(tm)
+	if !strings.Contains(out, "✦") {
+		t.Errorf("renderPersona = %q; want glyph ✦ present", out)
+	}
+	// Accent palette in makeTheme is #88c0d0 -> RGB(136,192,208).
+	if !strings.Contains(out, "\x1b[38;2;136;192;208m") {
+		t.Errorf("renderPersona should use accent color; got %q", out)
+	}
+}
+
+func TestRenderPersona_EmptyGlyphIsEmpty(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := New()
+	// Default persona ships with empty greeting_glyph.
+	tm := makeTheme(t, []string{"persona"})
+	if got := s.renderPersona(tm); got != "" {
+		t.Errorf("renderPersona on default persona = %q; want empty", got)
+	}
+}
