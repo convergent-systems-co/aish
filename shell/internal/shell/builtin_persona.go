@@ -3,6 +3,7 @@ package shell
 import (
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -51,19 +52,27 @@ func (s *Shell) openPersona(e *env.Env) {
 //
 // Subcommands:
 //
-//	persona list           — every persona in the registry, name + description.
-//	persona show <name>    — full schema of one persona.
-//	persona set <name>     — activate <name>; persist to ~/.aish/config.toml.
-//	persona use <name>     — alias for `set` (matches GOALS.md verb).
-//	persona active         — print the currently-active persona name.
+//	persona list             — every persona in the registry, name + description.
+//	persona show <name>      — full schema of one persona.
+//	persona set <name>       — activate <name>; persist to ~/.aish/config.toml.
+//	persona use <name>       — alias for `set` (matches GOALS.md verb).
+//	persona active           — print the currently-active persona name.
+//	persona create <name>    — interactive bootstrap (v0.3-5.1 #121).
+//	persona install <dir>    — verify + install a signed bundle (v0.3-5.1 #127).
+//	persona bundles          — list installed bundles (v0.3-5.1 #127).
 //
 // Bare `persona` prints a usage hint and exits 2.
-//
-// Deferred to v0.3-5.1:
-//   - `persona create <name>` — guided bootstrap (#121).
 func (s *Shell) personaBuiltin(args []string, stdout, stderr io.Writer) int {
+	return s.personaBuiltinIO(args, nil, stdout, stderr)
+}
+
+// personaBuiltinIO is the stdin-aware variant. Production dispatch
+// passes the REPL's stdin so `persona create` can read prompt
+// responses; the existing personaBuiltin shim preserves the
+// pre-v0.3-5.1 callsites that never needed stdin.
+func (s *Shell) personaBuiltinIO(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "Usage: persona list | show <name> | set <name> | use <name> | active")
+		fmt.Fprintln(stderr, "Usage: persona list | show <name> | set <name> | use <name> | active | create <name>")
 		return 2
 	}
 	if s.personas == nil {
@@ -81,6 +90,8 @@ func (s *Shell) personaBuiltin(args []string, stdout, stderr io.Writer) int {
 		return s.personaSet(rest, stdout, stderr)
 	case "active":
 		return s.personaActive(stdout)
+	case "create":
+		return s.personaCreate(rest, stdin, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "persona: unknown subcommand %q (try `persona list`)\n", sub)
 		return 2
@@ -174,6 +185,114 @@ func (s *Shell) personaSet(args []string, stdout, stderr io.Writer) int {
 	}
 	s.activePersona = name
 	fmt.Fprintf(stdout, "persona: active = %s\n", name)
+	return 0
+}
+
+// personaCreate runs the guided-bootstrap flow for #121. It reads
+// description, voice, tone (verbosity + formality + emoji), and
+// system_prompt from stdin and writes a TOML file under
+// ~/.aish/personas/<name>.toml. The persona registry is re-opened so
+// the new file is visible to `persona list` in the same session.
+//
+// When stdin is nil (test path), the call still creates the persona
+// using the supplied name + minimal defaults so unit tests can drive
+// it without piping. Production dispatch always provides stdin (the
+// REPL's caller stream).
+//
+// Validation runs BEFORE the file is written — a persona whose name
+// breaks the regex, whose system_prompt is empty, or whose system_prompt
+// trips the safety-bypass denylist surfaces a non-zero exit and no
+// disk artefact.
+func (s *Shell) personaCreate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "Usage: persona create <name>")
+		return 2
+	}
+	name := args[0]
+	home := homeDir(s.env)
+	if home == "" {
+		fmt.Fprintln(stderr, "persona: $HOME not set; cannot create persona")
+		return 1
+	}
+	if _, exists := s.personas.Get(name); exists {
+		fmt.Fprintf(stderr, "persona: %q already exists (use a different name)\n", name)
+		return 1
+	}
+	p := persona.Persona{
+		Name:    name,
+		Version: persona.SchemaVersion,
+		Tone: persona.Tone{
+			Verbosity: "medium",
+			Formality: "neutral",
+		},
+		// Minimal default so the file is valid even when the user
+		// presses Enter through every prompt. The bootstrap flow
+		// overwrites this when stdin gives a non-empty response.
+		SystemPrompt: "You are a helpful assistant inside the aish shell.",
+	}
+
+	if stdin != nil {
+		// Step through prompts. Each is optional (blank Enter keeps
+		// the default).
+		fmt.Fprintln(stderr, "description (one-line summary, blank to skip):")
+		if line, err := readSingleLine(stdin); err == nil {
+			p.Description = strings.TrimSpace(line)
+		}
+		fmt.Fprintln(stderr, "voice (how this persona speaks, blank to skip):")
+		if line, err := readSingleLine(stdin); err == nil {
+			p.Voice = strings.TrimSpace(line)
+		}
+		fmt.Fprintln(stderr, "verbosity [terse|medium|verbose] (default medium):")
+		if line, err := readSingleLine(stdin); err == nil {
+			v := strings.ToLower(strings.TrimSpace(line))
+			if v != "" {
+				p.Tone.Verbosity = v
+			}
+		}
+		fmt.Fprintln(stderr, "formality [casual|neutral|formal] (default neutral):")
+		if line, err := readSingleLine(stdin); err == nil {
+			f := strings.ToLower(strings.TrimSpace(line))
+			if f != "" {
+				p.Tone.Formality = f
+			}
+		}
+		fmt.Fprintln(stderr, "system_prompt (one line; blank keeps the default):")
+		if line, err := readSingleLine(stdin); err == nil {
+			if sp := strings.TrimSpace(line); sp != "" {
+				p.SystemPrompt = sp
+			}
+		}
+	}
+
+	// Validate before touching disk so a malformed persona never lands.
+	if err := p.Validate(); err != nil {
+		fmt.Fprintf(stderr, "persona: %v\n", err)
+		return 1
+	}
+
+	dir := filepath.Join(home, persona.ConfigDirName, persona.PersonaDirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		fmt.Fprintf(stderr, "persona: create dir: %v\n", err)
+		return 1
+	}
+	path := filepath.Join(dir, name+".toml")
+	if _, err := os.Stat(path); err == nil {
+		fmt.Fprintf(stderr, "persona: file %s already exists\n", path)
+		return 1
+	}
+	body, err := persona.EncodeTOML(p)
+	if err != nil {
+		fmt.Fprintf(stderr, "persona: encode: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		fmt.Fprintf(stderr, "persona: write: %v\n", err)
+		return 1
+	}
+
+	// Reopen the loader so the new file is visible without restart.
+	s.openPersona(s.env)
+	fmt.Fprintf(stdout, "persona: created %s at %s\n", name, path)
 	return 0
 }
 

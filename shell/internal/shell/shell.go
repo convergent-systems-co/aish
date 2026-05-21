@@ -872,11 +872,12 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 	}
 
 	// Built-in: `persona list | show <name> | set <name> | use <name>
-	// | active`. Per v0.3-5 acceptance (#114–#129).
+	// | active | create <name>`. Per v0.3-5 acceptance (#114–#129) and
+	// the v0.3-5.1 follow-ups (#121).
 	if line == "persona" || strings.HasPrefix(line, "persona ") || strings.HasPrefix(line, "persona\t") {
 		rest := strings.TrimSpace(strings.TrimPrefix(line, "persona"))
 		args := strings.Fields(rest)
-		s.SetLastExit(s.personaBuiltin(args, stdout, stderr))
+		s.SetLastExit(s.personaBuiltinIO(args, stdin, stdout, stderr))
 		return nil
 	}
 
