@@ -42,7 +42,11 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic("cache: TestMain: abs: " + err.Error())
 	}
-	build := exec.Command("go", "build", "-o", stubBinary, srcDir)
+	// -buildvcs=false keeps `go build` quiet when this checkout is a
+	// git worktree (`.git` is a file, not a directory) — without it
+	// the build fails with "error obtaining VCS status". Independent
+	// of v0.2-5 theming work; same fix is also in feat/v0.2-api-fix.
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", stubBinary, srcDir)
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
 		panic("cache: TestMain: build stub-plugin: " + err.Error())
