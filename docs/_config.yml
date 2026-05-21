@@ -1,0 +1,66 @@
+# Jekyll configuration for the aish documentation site.
+#
+# Hosted on GitHub Pages via the `gh-pages` workflow in
+# .github/workflows/pages.yml. Uses the official `just-the-docs`
+# theme for manpage-style content with sidebar nav + search.
+#
+# Local preview (requires Ruby + Bundler):
+#   cd docs && bundle install && bundle exec jekyll serve
+#
+# Production URL: https://convergent-systems-co.github.io/aish/
+
+title:       aish manual
+description: An AI-native, OS-insensitive, reversible shell — manual pages.
+url:         https://convergent-systems-co.github.io
+baseurl:     /aish
+remote_theme: just-the-docs/just-the-docs
+
+# --- Just-the-docs settings -------------------------------------------------
+
+# Order pages alphabetically by their `nav_order` front-matter when present,
+# alphabetically otherwise.
+nav_external_links:
+  - title: aish on GitHub
+    url: https://github.com/convergent-systems-co/aish
+    hide_icon: false
+
+search_enabled:        true
+search:
+  heading_level:       3
+  previews:            3
+  preview_words_before: 5
+  preview_words_after:  10
+  tokenizer_separator: /[\s\-/]+/
+  rel_url:             true
+  button:              false
+
+# Section names are themed via front matter on each page; the top-level
+# manual lives under `docs/index.md` and the per-built-in pages live
+# under `docs/man/`.
+
+heading_anchors: true
+
+# Footer note rendered on every page.
+footer_content: >-
+  aish is licensed under the project's repo license. Built by
+  <a href="https://github.com/convergent-systems-co">Convergent Systems</a>.
+
+# Markdown / Liquid configuration -------------------------------------------
+
+markdown:    kramdown
+highlighter: rouge
+kramdown:
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    block:
+      line_numbers: false
+
+# Files Jekyll should ignore.
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor/
+  - README.md
+
+# Permalink: keep pretty URLs (no .html).
+permalink: pretty

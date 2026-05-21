@@ -1,0 +1,23 @@
+# Gemfile for the aish documentation site.
+#
+# Mirrors the GitHub Pages production stack so `bundle exec jekyll serve`
+# locally renders the same HTML the deployed site does. Pinning is
+# loose because we follow upstream — if the deployed site diverges from
+# local, bump these.
+
+source "https://rubygems.org"
+
+gem "jekyll", "~> 4.3"
+gem "just-the-docs", "~> 0.10"
+gem "jekyll-remote-theme"
+
+group :jekyll_plugins do
+  gem "jekyll-seo-tag"
+  gem "jekyll-sitemap"
+end
+
+# Windows + JRuby compatibility (per upstream Jekyll Gemfile template).
+platforms :mingw, :x64_mingw, :mswin, :jruby do
+  gem "tzinfo", "~> 2.0"
+  gem "tzinfo-data"
+end
