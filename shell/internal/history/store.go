@@ -1,6 +1,7 @@
 package history
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -364,7 +365,15 @@ func (s *Store) Append(e *Event) error {
 			return fmt.Errorf("history: insert snapshot: %w", err)
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// #112 T3: post-commit embed-on-write hook. Best-effort —
+	// embedder/vec failure does NOT propagate. Skip-tainted policy
+	// lives inside embedAndStore (AC4). Nil-safe when either field
+	// is not attached (recovers pre-#112 behavior).
+	s.embedAndStore(context.Background(), e)
+	return nil
 }
 
 // Checkpoint writes a KindCheckpoint event named `name`. The event

@@ -1,10 +1,4 @@
-//go:build phase_b
-
 // T3 tests — write-path embed-on-Append integration.
-//
-// Build-gated by `phase_b`; the seed commit ships with these inert.
-// Phase B's coder wave lands embed_writer.go and modifies Append to
-// call into it.
 //
 // Acceptance criteria covered (from .artifacts/plans/112.md T3 + AC1, AC4):
 //   - TestAppend_EmbedsNonTainted — normal event → vector row exists.
