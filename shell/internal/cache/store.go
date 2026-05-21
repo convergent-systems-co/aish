@@ -48,7 +48,58 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("cache: apply DDL: %w", err)
 	}
+	// v0.2-3 migration: add the `source` column to existing DBs that
+	// pre-date it. The DDL above is CREATE TABLE IF NOT EXISTS so a
+	// pre-existing intents table keeps its original column set;
+	// PRAGMA table_info tells us whether the column needs to be
+	// backfilled via ALTER TABLE. Idempotent.
+	if err := migrateSourceColumn(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("cache: migrate source column: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// migrateSourceColumn ensures the `source` column exists on the
+// intents table. SQLite's ALTER TABLE ADD COLUMN is forwards-only;
+// safe to run on every Open because we gate it on a PRAGMA
+// table_info introspection.
+func migrateSourceColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(intents)`)
+	if err != nil {
+		return fmt.Errorf("table_info: %w", err)
+	}
+	defer rows.Close()
+	hasSource := false
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notnull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == "source" {
+			hasSource = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("table_info rows: %w", err)
+	}
+	if hasSource {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE intents ADD COLUMN source TEXT NOT NULL DEFAULT 'plugin'`); err != nil {
+		return fmt.Errorf("alter table: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_intents_source ON intents(source)`); err != nil {
+		return fmt.Errorf("create source index: %w", err)
+	}
+	return nil
 }
 
 // Close releases the database handle. Idempotent — a second Close on a
@@ -143,6 +194,20 @@ func (s *Store) Lookup(intent, os string) (string, bool, error) {
 // Write does NOT touch stats; counters are owned by Lookup (see its
 // docstring for the why).
 func (s *Store) Write(intent, os, invocation string, confidence float64, embedding []float32) error {
+	return s.WriteWithSource(intent, os, invocation, confidence, embedding, SourcePlugin)
+}
+
+// WriteWithSource is Write that records explicit provenance in the
+// `source` column. Added in v0.2-3 for the community-cache promotion
+// path: an L3 hit gets promoted to L1 with source=SourceCommunity so
+// `aish community info` can report how many rows came from the
+// community bundle.
+//
+// On upsert collision the source is overwritten — last write wins.
+// That matches the policy that the most recent provenance is the
+// best signal: a plugin-resolved row that was previously a community
+// promotion is now plugin-sourced, and vice versa.
+func (s *Store) WriteWithSource(intent, os, invocation string, confidence float64, embedding []float32, source string) error {
 	if s == nil || s.db == nil {
 		return errors.New("cache: Write: store is closed")
 	}
@@ -155,6 +220,9 @@ func (s *Store) Write(intent, os, invocation string, confidence float64, embeddi
 	if invocation == "" {
 		return errors.New("cache: Write: invocation is empty")
 	}
+	if source == "" {
+		source = SourcePlugin
+	}
 	if confidence < 0 {
 		confidence = 0
 	} else if confidence > 1 {
@@ -166,19 +234,48 @@ func (s *Store) Write(intent, os, invocation string, confidence float64, embeddi
 		embBlob = encodeEmbedding(embedding)
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO intents (intent_hash, os, intent, invocation, confidence, embedding)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO intents (intent_hash, os, intent, invocation, confidence, embedding, source)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(intent_hash, os) DO UPDATE SET
 		   invocation = excluded.invocation,
 		   confidence = excluded.confidence,
 		   embedding  = excluded.embedding,
+		   source     = excluded.source,
 		   last_used  = CURRENT_TIMESTAMP`,
-		h, os, intent, invocation, confidence, embBlob,
+		h, os, intent, invocation, confidence, embBlob, source,
 	)
 	if err != nil {
 		return fmt.Errorf("cache: Write: upsert: %w", err)
 	}
 	return nil
+}
+
+// EntriesBySource returns the row count for each distinct value in
+// the source column. The map is empty (not nil) on an empty table.
+// Used by `aish community info` to report community-sourced row
+// counts without scanning the whole table.
+func (s *Store) EntriesBySource() (map[string]int64, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("cache: EntriesBySource: store is closed")
+	}
+	out := map[string]int64{}
+	rows, err := s.db.Query(`SELECT source, COUNT(*) FROM intents GROUP BY source`)
+	if err != nil {
+		return nil, fmt.Errorf("cache: EntriesBySource: query: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var src string
+		var n int64
+		if err := rows.Scan(&src, &n); err != nil {
+			return nil, fmt.Errorf("cache: EntriesBySource: scan: %w", err)
+		}
+		out[src] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cache: EntriesBySource: rows: %w", err)
+	}
+	return out, nil
 }
 
 // LookupNearest scans the rows for the given OS and returns the single

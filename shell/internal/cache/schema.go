@@ -43,12 +43,14 @@ CREATE TABLE IF NOT EXISTS intents (
   confidence  REAL    NOT NULL DEFAULT 1.0,
   hit_count   INTEGER NOT NULL DEFAULT 0,
   embedding   BLOB,
+  source      TEXT    NOT NULL DEFAULT 'plugin',
   created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_used   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (intent_hash, os)
 );
 
 CREATE INDEX IF NOT EXISTS idx_intents_os ON intents(os);
+CREATE INDEX IF NOT EXISTS idx_intents_source ON intents(source);
 
 CREATE TABLE IF NOT EXISTS stats (
   key   TEXT PRIMARY KEY,
@@ -59,3 +61,12 @@ INSERT OR IGNORE INTO stats(key, value) VALUES ('hits', 0);
 INSERT OR IGNORE INTO stats(key, value) VALUES ('misses', 0);
 INSERT OR IGNORE INTO stats(key, value) VALUES ('total_queries', 0);
 `
+
+// SourcePlugin is the default value of intents.source. Rows written
+// via Cache.Resolve's plugin-inference path carry this value.
+const SourcePlugin = "plugin"
+
+// SourceCommunity is the value of intents.source for rows promoted
+// from the L3 community bundle. Used by `aish community info` to
+// count community-sourced entries.
+const SourceCommunity = "community"
