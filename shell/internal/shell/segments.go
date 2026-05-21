@@ -48,6 +48,13 @@ func (s *Shell) renderSegment(name string, t *theme.Theme) string {
 		return s.renderGitStatus(t)
 	case "exit", "exit-code":
 		return s.renderExitCode(t)
+	case "persona":
+		// v0.3-5.1 (#124): prompt-segment override. Themes that list
+		// "persona" in their segments slice render the active persona's
+		// greeting_glyph here, painted with the theme's accent colour.
+		// Empty when no glyph is configured or no persona is active —
+		// the segment drops out of the joined body per renderPromptBody.
+		return s.renderPersona(t)
 	case "prompt":
 		// The trailing prompt-char is added by Prompt() — declaring
 		// "prompt" as a segment is the canonical way themes indicate
@@ -61,6 +68,24 @@ func (s *Shell) renderSegment(name string, t *theme.Theme) string {
 		// sources land in subsequent epics.
 		return ""
 	}
+}
+
+// renderPersona returns the active persona's greeting_glyph painted
+// with the theme's accent colour, or "" when the glyph is empty or
+// no persona loader is wired. The persona segment is opt-in: a theme
+// must list "persona" in its segments slice to activate it. Personas
+// shipped today leave greeting_glyph empty by default — this segment
+// is the seam, not a forced UI change.
+func (s *Shell) renderPersona(t *theme.Theme) string {
+	if s.personas == nil {
+		return ""
+	}
+	p := s.Persona()
+	glyph := strings.TrimSpace(p.PromptOverrides.GreetingGlyph)
+	if glyph == "" {
+		return ""
+	}
+	return t.ColorAccent(glyph)
 }
 
 // renderCwd renders the working-directory segment with `~` collapse and

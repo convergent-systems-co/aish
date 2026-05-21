@@ -84,7 +84,7 @@ func (s *Shell) historyList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	for _, e := range events {
-		printEventOneLine(stdout, e)
+		s.printEventOneLine(stdout, e)
 	}
 	return 0
 }
@@ -103,7 +103,7 @@ func (s *Shell) historyShow(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "aish: history show: no event with id %q\n", args[0])
 		return 1
 	}
-	printEventDetailed(stdout, ev)
+	s.printEventDetailed(stdout, ev)
 	return 0
 }
 
@@ -125,7 +125,7 @@ func (s *Shell) historySearch(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	for _, e := range events {
-		printEventOneLine(stdout, e)
+		s.printEventOneLine(stdout, e)
 	}
 	return 0
 }
@@ -215,12 +215,17 @@ func (s *Shell) historyRollback(args []string, stdout, stderr io.Writer) int {
 
 // printEventOneLine writes one event as a compact list row. Shape:
 //
-//	<ts> <kind> <id> <command>
+//	<ts> <kind> <id> <command>  (persona=<name>)
 //
 // Timestamps render in the host's local time at second resolution
 // for readability; the full RFC3339 form is available via `history
 // show <id>`.
-func printEventOneLine(w io.Writer, e *history.Event) {
+//
+// v0.3-5.1 (#125): the trailing "(persona=…)" suffix surfaces the
+// persona that was active when the event was recorded. Events older
+// than the sidecar (pre-v0.3-5.1 rows) render as "(persona=?)" —
+// "default" means a persona was recorded; "?" means no row exists.
+func (s *Shell) printEventOneLine(w io.Writer, e *history.Event) {
 	if e == nil {
 		return
 	}
@@ -229,14 +234,32 @@ func printEventOneLine(w io.Writer, e *history.Event) {
 	if kind == "" {
 		kind = "?"
 	}
-	fmt.Fprintf(w, "%s  %-10s  %s  %s\n", ts, kind, e.ID, e.Command)
+	fmt.Fprintf(w, "%s  %-10s  %s  %s  (persona=%s)\n",
+		ts, kind, e.ID, e.Command, s.eventPersonaTag(e.ID))
+}
+
+// eventPersonaTag returns the persona attribution string suitable for
+// inline display. "?" when no sidecar row exists for the event; the
+// recorded name otherwise (which is "default" for events recorded
+// with no active persona).
+func (s *Shell) eventPersonaTag(eventID string) string {
+	if s == nil || s.personaMeta == nil {
+		return "?"
+	}
+	if name, ok := s.personaMeta.Lookup(eventID); ok {
+		return name
+	}
+	return "?"
 }
 
 // printEventDetailed dumps every field of an event in a human-readable
 // form. Used by `history show <id>`. Signature is reported as
 // "(unsigned)" when missing so the user knows pre-v0.3-4 events
 // migrated forward unsigned.
-func printEventDetailed(w io.Writer, e *history.Event) {
+//
+// v0.3-5.1 (#125): an additional "persona:" line renders the persona
+// active at command time, or "(none recorded)" for pre-v0.3-5.1 events.
+func (s *Shell) printEventDetailed(w io.Writer, e *history.Event) {
 	if e == nil {
 		return
 	}
@@ -247,6 +270,11 @@ func printEventDetailed(w io.Writer, e *history.Event) {
 		fmt.Fprintf(w, "name:      %s\n", e.Name)
 	}
 	fmt.Fprintf(w, "command:   %s\n", e.Command)
+	if tag := s.eventPersonaTag(e.ID); tag != "?" {
+		fmt.Fprintf(w, "persona:   %s\n", tag)
+	} else {
+		fmt.Fprintf(w, "persona:   (none recorded)\n")
+	}
 	if e.Cwd != "" {
 		fmt.Fprintf(w, "cwd:       %s\n", e.Cwd)
 	}

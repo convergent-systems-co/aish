@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/convergent-systems-co/aish/shell/internal/history"
+	"github.com/convergent-systems-co/aish/shell/internal/persona"
 	"github.com/convergent-systems-co/aish/shell/internal/secrets"
 )
 
@@ -49,10 +50,10 @@ func identityUsage() string {
 	return strings.TrimSpace(`
 Usage: identity <subcommand>
 
-  list                  list available identity profiles
-  show [<name>]         show details of an identity (default: active)
-  use <name>            set <name> as the active identity
-  create <name>         create a new identity profile (interactive)
+  list                              list available identity profiles
+  show [<name>]                     show details of an identity (default: active)
+  use <name> [--persona <persona>]  set <name> as the active identity; bind a persona
+  create <name>                     create a new identity profile (interactive)
 `)
 }
 
@@ -135,8 +136,15 @@ func (s *Shell) identityShow(args []string, stdout, stderr io.Writer) int {
 }
 
 func (s *Shell) identityUse(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		fmt.Fprintln(stderr, "Usage: identity use NAME")
+	// v0.3-5.1 (#128): accept `--persona <name>` after NAME. Two-arg
+	// shape `identity use NAME` keeps the pre-FU semantics; the
+	// four-arg shape `identity use NAME --persona <p>` activates both
+	// axes in one call. The persona binding is persisted to
+	// ~/.aish/identity-persona.toml so subsequent `identity use NAME`
+	// (without --persona) re-activates the bound persona too.
+	name, personaName, parseErr := parseIdentityUseArgs(args)
+	if parseErr != nil {
+		fmt.Fprintln(stderr, parseErr.Error())
 		return 1
 	}
 	home := homeDir(s.env)
@@ -144,7 +152,7 @@ func (s *Shell) identityUse(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "identity: HOME not set")
 		return 2
 	}
-	if err := secrets.SetActive(home, args[0]); err != nil {
+	if err := secrets.SetActive(home, name); err != nil {
 		// "profile not found" is a user error (1); the rest is IO (2).
 		if errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(stderr, "identity: %s\n", err.Error())
@@ -153,9 +161,62 @@ func (s *Shell) identityUse(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "identity: %s\n", err.Error())
 		return 2
 	}
-	fmt.Fprintf(stdout, "identity: active = %s\n", args[0])
-	s.recordIdentityUse(args[0])
+	fmt.Fprintf(stdout, "identity: active = %s\n", name)
+
+	// Persona binding: explicit --persona wins. When --persona is
+	// absent, fall back to the existing binding for this identity.
+	chosenPersona := personaName
+	if chosenPersona == "" {
+		chosenPersona = persona.ReadBinding(home, name)
+	} else {
+		// Persist the explicit choice so future `identity use NAME`
+		// (without --persona) re-activates the same persona.
+		if err := persona.WriteBinding(home, name, chosenPersona); err != nil {
+			fmt.Fprintf(stderr, "identity: persona binding: %v\n", err)
+			// Non-fatal — identity is already active. Continue to
+			// activate the persona in-process so the user sees the
+			// effect even if the binding file write failed.
+		}
+	}
+	if chosenPersona != "" && s.personas != nil {
+		if _, ok := s.personas.Get(chosenPersona); ok {
+			if err := persona.WriteActivePersona(home, chosenPersona); err != nil {
+				fmt.Fprintf(stderr, "identity: activate persona %q: %v\n", chosenPersona, err)
+			} else {
+				s.activePersona = chosenPersona
+				fmt.Fprintf(stdout, "persona:  active = %s (bound to identity %s)\n", chosenPersona, name)
+			}
+		} else {
+			fmt.Fprintf(stderr, "identity: persona %q is not in the registry; binding kept but not activated\n", chosenPersona)
+		}
+	}
+
+	s.recordIdentityUse(name)
 	return 0
+}
+
+// parseIdentityUseArgs parses the argv tail of `identity use`. Accepted
+// shapes:
+//
+//	identity use NAME
+//	identity use NAME --persona <persona-name>
+//
+// Returns (name, persona, err). An empty persona is the no-flag case.
+func parseIdentityUseArgs(args []string) (string, string, error) {
+	switch len(args) {
+	case 1:
+		return args[0], "", nil
+	case 3:
+		if args[1] != "--persona" {
+			return "", "", fmt.Errorf("Usage: identity use NAME [--persona <persona>]")
+		}
+		if args[2] == "" {
+			return "", "", fmt.Errorf("identity: --persona requires a non-empty value")
+		}
+		return args[0], args[2], nil
+	default:
+		return "", "", fmt.Errorf("Usage: identity use NAME [--persona <persona>]")
+	}
 }
 
 // identityCreate runs the create flow. With no stdin attached, it

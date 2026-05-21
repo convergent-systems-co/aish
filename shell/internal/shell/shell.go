@@ -75,6 +75,11 @@ type Shell struct {
 	// accessor handles the fallback. Written by `persona set` and
 	// restored from ~/.aish/config.toml on New().
 	activePersona string
+	// personaMeta is the v0.3-5.1 sidecar mapping history event IDs to
+	// the persona that was active when the event was recorded. nil
+	// before openPersona wires it, or whenever the history engine is
+	// not available — `history list` then renders persona as "?".
+	personaMeta *persona.MetaStore
 	// interceptors is the registered set of PreCommand/PostCommand
 	// observers. History registers as one entry; telemetry (v0.1-5)
 	// registers a second. Order is insertion order for Before;
@@ -873,11 +878,12 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 	}
 
 	// Built-in: `persona list | show <name> | set <name> | use <name>
-	// | active`. Per v0.3-5 acceptance (#114–#129).
+	// | active | create <name>`. Per v0.3-5 acceptance (#114–#129) and
+	// the v0.3-5.1 follow-ups (#121).
 	if line == "persona" || strings.HasPrefix(line, "persona ") || strings.HasPrefix(line, "persona\t") {
 		rest := strings.TrimSpace(strings.TrimPrefix(line, "persona"))
 		args := strings.Fields(rest)
-		s.SetLastExit(s.personaBuiltin(args, stdout, stderr))
+		s.SetLastExit(s.personaBuiltinIO(args, stdin, stdout, stderr))
 		return nil
 	}
 
