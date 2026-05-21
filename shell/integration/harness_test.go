@@ -39,7 +39,10 @@ func TestMain(m *testing.M) {
 	}
 	binaryPath = filepath.Join(tmpDir, binaryName)
 
-	build := exec.Command("go", "build", "-o", binaryPath, cmdImport)
+	// -buildvcs=false: see plugins/cloud/integration/harness_test.go
+	// and shell/internal/cache/plugin_test.go for the same fix.
+	// Worktree checkouts (.git is a file) trip Go's VCS stamping.
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", binaryPath, cmdImport)
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "integration: go build failed:\n%s\n", out)
 		os.Exit(1)
