@@ -96,7 +96,7 @@ func (s *Shell) personaBuiltin(args []string, stdout, stderr io.Writer) int {
 // pre-v0.3-5.1 callsites that never needed stdin.
 func (s *Shell) personaBuiltinIO(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "Usage: persona list | show <name> | set <name> | use <name> | active | create <name>")
+		fmt.Fprintln(stderr, "Usage: persona list | show <name> | set <name> | use <name> | active | create <name> | install <dir> | bundles")
 		return 2
 	}
 	if s.personas == nil {
@@ -116,10 +116,67 @@ func (s *Shell) personaBuiltinIO(args []string, stdin io.Reader, stdout, stderr 
 		return s.personaActive(stdout)
 	case "create":
 		return s.personaCreate(rest, stdin, stdout, stderr)
+	case "install":
+		return s.personaInstall(rest, stdout, stderr)
+	case "bundles":
+		return s.personaBundles(stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "persona: unknown subcommand %q (try `persona list`)\n", sub)
 		return 2
 	}
+}
+
+// personaInstall verifies + installs a signed persona bundle
+// directory into ~/.aish/persona-bundles/<bundle_id>/. The personas
+// inside the bundle are also copied to ~/.aish/personas/ where the
+// loader picks them up on the next session (or after the in-process
+// reopen).
+func (s *Shell) personaInstall(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "Usage: persona install <dir>")
+		return 2
+	}
+	home := homeDir(s.env)
+	if home == "" {
+		fmt.Fprintln(stderr, "persona: $HOME not set; cannot install bundle")
+		return 1
+	}
+	dotAish := filepath.Join(home, persona.ConfigDirName)
+	manifest, err := persona.InstallBundle(args[0], dotAish, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "persona install: %v\n", err)
+		return 1
+	}
+	// Reopen the loader so new personas appear immediately.
+	s.openPersona(s.env)
+	fmt.Fprintf(stdout, "persona install: installed bundle %s v%d (%d personas, signer=%s)\n",
+		manifest.BundleID, manifest.BundleVersion, manifest.PersonaCount, manifest.SignerID)
+	return 0
+}
+
+// personaBundles lists installed bundles under
+// ~/.aish/persona-bundles/ with their manifest summary.
+func (s *Shell) personaBundles(stdout, stderr io.Writer) int {
+	home := homeDir(s.env)
+	if home == "" {
+		fmt.Fprintln(stderr, "persona: $HOME not set")
+		return 1
+	}
+	dotAish := filepath.Join(home, persona.ConfigDirName)
+	bundles, err := persona.ListBundles(dotAish)
+	if err != nil {
+		fmt.Fprintf(stderr, "persona bundles: %v\n", err)
+		return 1
+	}
+	if len(bundles) == 0 {
+		fmt.Fprintln(stdout, "(no persona bundles installed)")
+		return 0
+	}
+	for _, b := range bundles {
+		fmt.Fprintf(stdout, "%-24s  v%-3d  %-20s  %d personas\n",
+			b.ID, b.BundleVersion, b.SignerID, b.PersonaCount)
+	}
+	return 0
 }
 
 // personaList renders every persona name + one-line description in
