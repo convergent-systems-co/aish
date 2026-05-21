@@ -32,12 +32,14 @@ const (
 	// relative to the test package directory.
 	cmdImport = "../cmd/aish-inference-cloud"
 
-	// fakeAPIKey is the synthetic key every test uses for the
-	// $ANTHROPIC_API_KEY env var. It is a literal string with no
-	// upstream meaning; the redaction tests assert this exact value
-	// never appears in any user-visible output. It MUST appear ONLY
-	// in plugins/cloud/integration/*_test.go per Common.md §4.
-	fakeAPIKey = "sk-test-integration-AAAA"
+	// fakeAPIKey is the synthetic token every test uses for the
+	// $CS_API_KEY env var (or its back-compat alias). It is a literal
+	// string with no upstream meaning; the redaction tests assert this
+	// exact value never appears in any user-visible output. It MUST
+	// appear ONLY in plugins/cloud/integration/*_test.go per
+	// Common.md §4. The "cs_" prefix mirrors the real token shape the
+	// auth-proxy issues (per core-infra/README.md §"Obtaining a token").
+	fakeAPIKey = "cs_test_integration_AAAA"
 )
 
 // TestMain builds aish-inference-cloud once into a temp dir, then runs
@@ -158,20 +160,23 @@ func run(t *testing.T, opts runOpts) *session {
 	}
 }
 
-// envWithKey returns a minimal env slice with ANTHROPIC_API_KEY set
-// to fakeAPIKey and PATH/HOME preserved from the parent process so
-// the subprocess can still locate go-build-time runtime files and
-// (when needed) the cost-log directory.
+// envWithKey returns a minimal env slice with CS_API_KEY set to
+// fakeAPIKey and PATH/HOME preserved from the parent process so the
+// subprocess can still locate go-build-time runtime files and (when
+// needed) the cost-log directory.
+//
+// Note: the plugin also accepts the legacy ANTHROPIC_API_KEY for
+// back-compat. Tests use the canonical CS_API_KEY going forward.
 func envWithKey() []string {
 	return envWithKeyAndExtras()
 }
 
 // envWithKeyAndExtras returns envWithKey plus any additional KEY=VALUE
-// strings the caller supplies. Useful for ANTHROPIC_BASE_URL fallback
-// tests.
+// strings the caller supplies. Useful for CS_BASE_URL / back-compat
+// alias tests.
 func envWithKeyAndExtras(extras ...string) []string {
 	env := []string{
-		"ANTHROPIC_API_KEY=" + fakeAPIKey,
+		"CS_API_KEY=" + fakeAPIKey,
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + os.Getenv("HOME"),
 	}
@@ -179,8 +184,9 @@ func envWithKeyAndExtras(extras ...string) []string {
 	return env
 }
 
-// envWithoutKey returns an env slice deliberately missing the
-// ANTHROPIC_API_KEY var. Used by the fail-fast missing-key test.
+// envWithoutKey returns an env slice deliberately missing both the
+// CS_API_KEY var and its legacy ANTHROPIC_API_KEY alias. Used by the
+// fail-fast missing-key test.
 func envWithoutKey() []string {
 	return []string{
 		"PATH=" + os.Getenv("PATH"),

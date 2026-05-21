@@ -17,6 +17,8 @@
 // See GOALS.md §"Inference Plugin Contract" for the broader design.
 package inference
 
+import "errors"
+
 // Version is the JSON-RPC protocol version aish speaks. Always "2.0".
 const Version = "2.0"
 
@@ -210,7 +212,21 @@ const (
 	CodeInternal       = -32603 // server-side error
 
 	// Plugin-specific application codes (–32099 to –32000 reserved range).
-	CodeAuthFailed  = -32001 // API key missing/rejected
-	CodeRateLimited = -32002 // upstream rate-limited
-	CodeTimeout     = -32003 // request exceeded plugin's timeout
+	CodeAuthFailed     = -32001 // API key missing/rejected
+	CodeRateLimited    = -32002 // upstream rate-limited
+	CodeTimeout        = -32003 // request exceeded plugin's timeout
+	CodeNotImplemented = -32004 // method is recognised but the underlying capability is not yet wired
 )
+
+// ErrEmbedNotImplemented is the typed sentinel a plugin returns when
+// the gateway it talks to does not (yet) serve an embeddings endpoint.
+// Callers — notably shell/internal/cache.Cache.Resolve — branch on
+// errors.Is(err, ErrEmbedNotImplemented) to skip the similarity-search
+// branch and fall through to plain Infer.
+//
+// The sentinel exists distinct from CodeNotImplemented so that
+// `errors.Is` matches at the Go-error layer without requiring the
+// caller to deserialise a JSON-RPC error envelope. The JSON-RPC error
+// shape uses CodeNotImplemented; this Go error is what `PluginClient`
+// returns to its in-process callers.
+var ErrEmbedNotImplemented = errors.New("inference: embed: endpoint not implemented by this plugin's gateway")
