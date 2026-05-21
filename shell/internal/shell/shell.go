@@ -638,7 +638,8 @@ func (s *Shell) ResolveTier(firstToken string) term.Tier {
 	case "cd", "export", "theme", "cache", "community", "plugin", "stats", "undo", "restore",
 		"run", "explain", "migrate", "persona", "secret", "identity",
 		"logout", "exec", "history",
-		"install", "service", "process", "env", "network":
+		"install", "service", "process", "env", "network",
+		"alias", "source", "set", "unset":
 		return term.TierBuiltin
 	}
 	if isKnownBinary(firstToken, s.env) {
@@ -913,6 +914,42 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		return nil
 	}
 
+	// Built-in: `alias [NAME[=COMMAND] ...]` — v0.3-1 follow-up #87.
+	// Bare `alias` lists; `alias NAME` looks up; `alias NAME=VAL`
+	// registers in the live session.
+	if line == "alias" || strings.HasPrefix(line, "alias ") || strings.HasPrefix(line, "alias\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "alias"))
+		args := splitAliasArgs(rest)
+		s.SetLastExit(s.aliasBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `source <file>` — v0.3-1 follow-up #87. TOML aishrc OR
+	// POSIX-ish K=V env lines.
+	if line == "source" || strings.HasPrefix(line, "source ") || strings.HasPrefix(line, "source\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "source"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.sourceBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `set [NAME=VALUE ...]` — v0.3-1 follow-up #87. Bare
+	// `set` lists session env; `set FOO=bar` binds locally (no export).
+	if line == "set" || strings.HasPrefix(line, "set ") || strings.HasPrefix(line, "set\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "set"))
+		args := splitAliasArgs(rest)
+		s.SetLastExit(s.setBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `unset NAME [NAME ...]` — v0.3-1 follow-up #87.
+	if line == "unset" || strings.HasPrefix(line, "unset ") || strings.HasPrefix(line, "unset\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "unset"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.unsetBuiltin(args, stdout, stderr))
+		return nil
+	}
+
 	// Built-in: `exec <cmd>` — v0.3-1 task #87 subset. On POSIX,
 	// syscall.Exec replaces the current process and never returns
 	// on success. Bare `exec` is a no-op. Resolution failure is
@@ -977,6 +1014,12 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 // the known-binary tier (with $VAR-expanded text) and the cache tier
 // (with the plugin-compiled invocation).
 //
+// v0.3-1 follow-up #88: ahead of Parse, we run command substitution
+// (`$(cmd)`) on the raw line. After Parse, we run brace + glob
+// expansion per token. After expansion, the alias table rewrites
+// the first token. All three passes are no-ops on inputs without
+// their trigger characters.
+//
 // Interceptor seam (v0.1-4): each registered Interceptor.Before fires
 // just before exec.Run, in registration order. After fires immediately
 // post-exec in REVERSE order so the last-registered observer sees the
@@ -984,7 +1027,22 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 // stderr but does NOT abort the command — "snapshot is best-effort,
 // command is mandatory."
 func (s *Shell) runExternal(cmdline string, stdin io.Reader, stdout, stderr io.Writer) error {
-	pipeline, parseErr := parser.Parse(cmdline)
+	// Command substitution before tokenization so `$(cmd)` produces
+	// the substituted text that downstream parsing then tokenizes.
+	substituted, cmdSubErr := parser.ExpandLine(cmdline, parser.ExpandContext{
+		Cwd:    s.cwd,
+		CmdSub: s,
+		Stderr: stderr,
+	})
+	if cmdSubErr != nil {
+		fmt.Fprintf(stderr, "aish: %v\n", cmdSubErr)
+		s.SetLastExit(2)
+		return nil
+	}
+	// Alias rewrite on the substituted line so an alias defined as
+	// `alias ll='ls -la'` rewrites `ll | wc -l` -> `ls -la | wc -l`.
+	substituted = s.resolveAlias(substituted, stderr)
+	pipeline, parseErr := parser.Parse(substituted)
 	if parseErr != nil {
 		fmt.Fprintf(stderr, "aish: parse: %v\n", parseErr)
 		s.SetLastExit(2)
@@ -993,6 +1051,20 @@ func (s *Shell) runExternal(cmdline string, stdin io.Reader, stdout, stderr io.W
 	if len(pipeline.Commands) == 0 {
 		return nil
 	}
+	// Brace + glob expansion per Arg. ExpandPipeline is a no-op on
+	// inputs without `{` / `*` / `?` / `[`, so existing tests with
+	// clean inputs are unaffected.
+	expanded, expandErr := parser.ExpandPipeline(pipeline, parser.ExpandContext{
+		Cwd:    s.cwd,
+		CmdSub: s,
+		Stderr: stderr,
+	})
+	if expandErr != nil {
+		fmt.Fprintf(stderr, "aish: expand: %v\n", expandErr)
+		s.SetLastExit(2)
+		return nil
+	}
+	pipeline = expanded
 	for _, ic := range s.interceptors {
 		if err := ic.Before(&pipeline, cmdline); err != nil {
 			fmt.Fprintf(stderr, "aish: interceptor: %v\n", err)
@@ -1186,6 +1258,79 @@ func homeDir(e *env.Env) string {
 		return h
 	}
 	return ""
+}
+
+// RunForCapture executes cmd as a sub-pipeline and returns its stdout.
+// Satisfies parser.CmdSubExecutor so the parser package can perform
+// `$(...)` command substitution without importing the shell package.
+//
+// Implementation: build an in-memory stdout buffer, route through
+// runExternal (the same path the REPL uses) so the sub-command sees
+// the full dispatch tier — built-ins, aliases, plugin cache, exec.
+// Stdin is empty (POSIX `$(...)` doesn't forward parent stdin) and
+// stderr is the caller's stderr.
+//
+// The returned string includes embedded newlines; the parser strips
+// trailing ones per POSIX convention.
+func (s *Shell) RunForCapture(cmd string, stderr io.Writer) (string, error) {
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	var buf strings.Builder
+	// `runExternal` returns non-nil only on caller-stream I/O failures;
+	// any sub-command non-zero exit is reflected in s.lastExit but is
+	// NOT promoted to an error here (matches bash: `$(false)` yields
+	// empty string + nonzero $? — we set lastExit on return).
+	prevExit := s.lastExit
+	if err := s.runExternal(cmd, strings.NewReader(""), &buf, stderr); err != nil {
+		return "", err
+	}
+	// Restore the outer lastExit so the sub-shell's exit doesn't leak
+	// into the parent's $? before the parent has finished. The
+	// substituted text is the contract; $? semantics are handled by
+	// the outer command.
+	subExit := s.lastExit
+	s.lastExit = prevExit
+	_ = subExit // documented above; nothing to do with it here.
+	return buf.String(), nil
+}
+
+// splitAliasArgs tokenizes args for the `alias` and `set` built-ins.
+// Unlike `strings.Fields`, this preserves quoted substrings so
+// `alias ll='ls -la'` becomes one arg `ll=ls -la` (the quotes are
+// stripped by the builtin's own logic). Double quotes behave the same
+// way for v0.3-1; full POSIX quote semantics are the parser's job.
+//
+// This is a deliberately simple lexer — input is already known to be
+// a flat aish input line (no pipes, no redirects). For more complex
+// inputs the caller should run parser.Parse first.
+func splitAliasArgs(input string) []string {
+	if input == "" {
+		return nil
+	}
+	var out []string
+	var b strings.Builder
+	inSingle, inDouble := false, false
+	flush := func() {
+		if b.Len() > 0 {
+			out = append(out, b.String())
+			b.Reset()
+		}
+	}
+	for _, r := range input {
+		switch {
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case (r == ' ' || r == '\t') && !inSingle && !inDouble:
+			flush()
+		default:
+			b.WriteRune(r)
+		}
+	}
+	flush()
+	return out
 }
 
 // stripOuterQuotes removes one layer of matching single or double quotes
