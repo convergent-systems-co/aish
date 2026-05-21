@@ -105,6 +105,18 @@ type Shell struct {
 	// clipboard via secrets.CopyToClipboard. Tests inject a capturing
 	// stub via SetClipboardFnForTesting.
 	secretClipFn func([]byte) error
+	// taintReg is the per-line tainted-value registry (#96/#99). The
+	// lifecycle is one registry per `runExternal` call: a fresh
+	// registry is constructed at the top of the function and the
+	// shell's pointer is swapped in for the duration. `RunForCapture`
+	// observes the active registry and adds the captured stdout of
+	// a `secret get NAME` sub-pipeline to it. The post-Parse pipeline
+	// walker then flips Command.Tainted / Pipeline.Tainted bits on
+	// exact-match. See secrets/taint.go for the registry contract.
+	//
+	// nil-safe: an unset pointer reads as "no taint tracking" which
+	// matches the pre-v0.3-fu behavior exactly.
+	taintReg *secrets.TaintedRegistry
 	// loginMode is true when aish was invoked as a login shell — via
 	// `-l`, `--login`, or `argv[0][0] == '-'`. Controls RC sourcing
 	// (login.go) and `logout` semantics (builtin_logout.go). Set by
@@ -762,6 +774,16 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		return nil
 	}
 
+	// v0.3-fu-secrets #96/#99: each top-level dispatched line gets a
+	// fresh tainted-value registry. The registry survives any nested
+	// `$(...)` expansions (RunForCapture → runExternal recursion) for
+	// the duration of this line, and is dropped on dispatch return so
+	// the next line starts clean. nil-coalescing at the bottom of
+	// `runExternal` is the consumer side; here we just establish the
+	// per-line lifecycle.
+	s.taintReg = secrets.NewTaintedRegistry()
+	defer func() { s.taintReg = nil }()
+
 	// Built-in: `cd` or `cd <path>`. Trimming the prefix tolerates a
 	// trailing space after `cd` (`cd `) and `cd<TAB>` alike.
 	if line == "cd" || strings.HasPrefix(line, "cd ") || strings.HasPrefix(line, "cd\t") {
@@ -1158,6 +1180,25 @@ func (s *Shell) runExternal(cmdline string, stdin io.Reader, stdout, stderr io.W
 		return nil
 	}
 	pipeline = expanded
+	// v0.3-fu-secrets #96 + #99: walk the expanded pipeline and flip
+	// taint bits. Two contributors to taint:
+	//
+	//  1. Any token in any stage's Name/Args that exact-matches a
+	//     literal previously registered by RunForCapture (the
+	//     `$(secret get NAME)` capture path).
+	//
+	//  2. Any stage whose Name == "secret" AND Args[0] == "get". A
+	//     direct `secret get NAME | next-stage` form pipes the secret
+	//     value as the next stage's stdin; the whole pipeline must be
+	//     redacted from history even though no `$(...)` capture
+	//     happened. (The stdout of `secret get` is the confirmation
+	//     line, not the value — so the *value itself* never enters
+	//     argv on this path. But the user clearly intended to keep
+	//     this off the record, so we still redact.)
+	//
+	// Either contributor flips the per-Command Tainted bit; any one
+	// tainted Command flips Pipeline.Tainted (sticky-bit propagation).
+	tagPipelineTaint(&pipeline, s.taintReg)
 	// v0.3-1 follow-up #83: a pipeline parsed with a trailing `&`
 	// becomes a background job. Interceptors STILL fire (history /
 	// telemetry want to know the job started), but exec is async:
@@ -1405,7 +1446,65 @@ func (s *Shell) RunForCapture(cmd string, stderr io.Writer) (string, error) {
 	subExit := s.lastExit
 	s.lastExit = prevExit
 	_ = subExit // documented above; nothing to do with it here.
-	return buf.String(), nil
+
+	captured := buf.String()
+	// v0.3-fu-secrets #96: if the sub-pipeline is a `secret get NAME`
+	// invocation, register the captured stdout as tainted on the
+	// shell's per-line registry. The outer pipeline walker will then
+	// flip Pipeline.Tainted on any token whose value matches this
+	// literal — keeping the secret out of history/audit.
+	//
+	// `secret get` writes the value to the clipboard only and emits
+	// the "value copied to clipboard" confirmation to stdout, NOT
+	// the value itself. So in production the captured stdout is the
+	// confirmation message — also tainted (the user clearly intended
+	// to keep this transaction off the record). Tests that wire a
+	// capturing clipboard stub may surface the value itself; either
+	// way, the captured text MUST be redacted from history.
+	if isSecretGetInvocation(cmd) {
+		// Register both the raw captured text and the trimmed form
+		// (the parser strips trailing newlines per POSIX). Either
+		// shape may surface as a parsed argument.
+		s.taintReg.Add(captured)
+		trimmed := strings.TrimRight(captured, "\n")
+		if trimmed != captured {
+			s.taintReg.Add(trimmed)
+		}
+	}
+	return captured, nil
+}
+
+// isSecretGetInvocation returns true when cmd's first stage (after
+// trimming) is `secret get`. We use a lightweight prefix check
+// because the substituted text reaches this function before its own
+// parse — we deliberately avoid recursing into parser.Parse here so
+// the taint check is allocation-light and side-effect-free.
+//
+// False positives are bounded: a user shadowing `secret` with an
+// alias still tags their own pipeline as tainted, which is a defense
+// in depth, not a regression — the worst case is over-redaction.
+func isSecretGetInvocation(cmd string) bool {
+	trimmed := strings.TrimSpace(cmd)
+	if !strings.HasPrefix(trimmed, "secret") {
+		return false
+	}
+	// Must be "secret get ..." with a space after "secret".
+	after := trimmed[len("secret"):]
+	if after == "" {
+		return false
+	}
+	if after[0] != ' ' && after[0] != '\t' {
+		return false
+	}
+	rest := strings.TrimLeft(after, " \t")
+	if !strings.HasPrefix(rest, "get") {
+		return false
+	}
+	tail := rest[len("get"):]
+	if tail == "" {
+		return false
+	}
+	return tail[0] == ' ' || tail[0] == '\t'
 }
 
 // splitAliasArgs tokenizes args for the `alias` and `set` built-ins.

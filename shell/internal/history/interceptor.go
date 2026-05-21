@@ -82,6 +82,31 @@ func (h *History) Store() *Store {
 	return h.store
 }
 
+// RedactedTainted is the placeholder string the History engine writes
+// in place of a command line when the pipeline is flagged as tainted.
+// Mirrors the secrets-package constant; duplicated here to avoid
+// importing secrets from history (history is a lower-tier package).
+//
+// Tests that assert "no secret appears in history" match on this
+// literal — if you change it, also change secrets.RedactedTainted to
+// keep the round-trip consistent.
+const RedactedTainted = "[REDACTED:tainted]"
+
+// recordCommand returns the string to persist in the events table's
+// `command` column. When the pipeline is flagged Tainted (v0.3-fu
+// #96/#98/#99), the literal command line is replaced with the
+// redaction placeholder. Otherwise `line` passes through verbatim.
+//
+// Centralised here so every event-Append path goes through the same
+// redaction gate; downstream consumers (FTS, telemetry) never see
+// the raw line of a tainted pipeline.
+func recordCommand(pl *parser.Pipeline, line string) string {
+	if pl != nil && pl.Tainted {
+		return RedactedTainted
+	}
+	return line
+}
+
 // Before runs as the PreCommand step. It inspects the pipeline, and
 // when IsDestructive returns true:
 //  1. Resolves each target path against the shell cwd.
@@ -131,7 +156,7 @@ func (h *History) Before(pl *parser.Pipeline, line string) error {
 		ID:        NewEventID(),
 		Timestamp: time.Now().UTC(),
 		Kind:      KindSnapshot,
-		Command:   line,
+		Command:   recordCommand(pl, line),
 		Cwd:       h.currentCwd(),
 		Affected:  recs,
 	}

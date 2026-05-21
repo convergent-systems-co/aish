@@ -21,6 +21,17 @@ type Command struct {
 	Name string
 	// Args are argv[1:] — flags and positional args in left-to-right order.
 	Args []string
+	// Tainted is set when this command's argv (Name or any element of
+	// Args) carries a value known to have originated from a secret —
+	// e.g. the captured stdout of `$(secret get NAME)`. The flag is
+	// purely informational at the parser layer; downstream consumers
+	// (the history interceptor) read it to redact the recorded command
+	// line. See v0.3-fu-secrets §"Acceptance Criteria #96/#98/#99".
+	//
+	// The flag is conservatively additive — a false value matches the
+	// pre-v0.3-fu behavior exactly. Only the shell sets it; the parser
+	// itself never tags a command tainted.
+	Tainted bool
 }
 
 // Pipeline is the parsed shape of one shell line: one or more Commands
@@ -36,6 +47,16 @@ type Pipeline struct {
 	// Mid-line `&` is rejected as a syntax error in this PR — the POSIX
 	// statement-separator form is future work.
 	Background bool
+	// Tainted is the sticky-bit propagation flag (v0.3-fu-secrets #99).
+	// True when ANY Command in the pipeline is itself Tainted. The
+	// rationale is the unix-pipe semantics: a tainted stage's stdout
+	// flows into the next stage's stdin, so the secret transits every
+	// downstream stage and the *whole line* MUST be redacted from
+	// history, telemetry, or any other persistent log.
+	//
+	// As with Command.Tainted, this is purely additive — pipelines
+	// constructed without a tainted source are untouched.
+	Tainted bool
 }
 
 // Parse converts a single line of input into a Pipeline.
