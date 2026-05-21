@@ -12,6 +12,8 @@ require (
 	modernc.org/sqlite v1.50.1
 )
 
+require gopkg.in/yaml.v3 v3.0.1 // indirect
+
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/godbus/dbus/v5 v5.2.2

@@ -82,6 +82,15 @@ type Persona struct {
 	// PromptOverrides drives the v0.2-5 prompt-segment system. Wired
 	// in v0.3-5.1 (#124 deferred).
 	PromptOverrides PromptOverrides `toml:"prompt_overrides"`
+
+	// ExternalBindings declares which OS-level identities this
+	// persona binds (SSH agent key, cloud CLI profiles, kubectl
+	// context, git config). Optional — a persona with no bindings
+	// has IDENTICAL behaviour to the pre-#104 path. See
+	// external_bindings.go for the schema and
+	// internal/persona/adapter/ for the orchestrator. Wired in
+	// v0.3-3 (#104).
+	ExternalBindings ExternalBindings `toml:"external,omitempty"`
 }
 
 // Tone is the typed tone block. Verbosity and Formality are enums;
