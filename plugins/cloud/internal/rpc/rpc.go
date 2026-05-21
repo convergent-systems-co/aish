@@ -9,9 +9,9 @@
 // per frame, each tagged with the originating Request.ID.
 //
 // This package is the boundary between transport (stdin/stdout, NDJSON)
-// and inference logic (the anthropic client lives in
-// plugins/cloud/internal/anthropic). It deliberately knows nothing about
-// the Anthropic API.
+// and inference logic (the csllm client lives in
+// plugins/cloud/internal/csllm). It deliberately knows nothing about
+// the upstream LLM gateway's wire shape.
 package rpc
 
 import (

@@ -204,7 +204,7 @@ func main() {
 	fs.BoolVar(&showVersion, "v", false, "print version and exit (shorthand)")
 	fs.BoolVar(&showHelp, "help", false, "print help and exit")
 	fs.BoolVar(&showHelp, "h", false, "print help and exit (shorthand)")
-	fs.StringVar(&apiURL, "api-url", "", "override the Anthropic base URL (wins over $ANTHROPIC_BASE_URL)")
+	fs.StringVar(&apiURL, "api-url", "", "override the CS gateway base URL (wins over $CS_BASE_URL/$ANTHROPIC_BASE_URL)")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
@@ -405,8 +405,12 @@ func embedHandler(client *csllm.Client, cost *reliab.Cost, out io.Writer, apiKey
 		}
 
 		// Record cost for the embedding bucket. The model field
-		// distinguishes embed (e.g. "voyage-3") from infer
-		// (e.g. "claude-opus-4-7") in the aggregated cost log.
+		// distinguishes embed (when implemented — see core-infra#10)
+		// from infer (e.g. "@cf/meta/llama-3.1-8b-instruct") in the
+		// aggregated cost log. Today this code path is unreachable
+		// because Embed returns the typed not-implemented sentinel
+		// before any result is produced; left in place so the cost
+		// plumbing is ready for #10.
 		if cost != nil && result.Cost != nil {
 			if recErr := cost.Record(result.Cost.Model, result.Cost.TokensIn, result.Cost.TokensOut, result.Cost.USD); recErr != nil {
 				fmt.Fprintln(os.Stderr, redactKey(fmt.Sprintf("aish-inference-cloud: cost.Record: %v", recErr), apiKey))
