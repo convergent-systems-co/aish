@@ -216,6 +216,59 @@ func TestSelectRegistryInferencePlugin_RegisteredPlugin(t *testing.T) {
 	}
 }
 
+func TestSelectRegistryInferencePlugin_RejectsTamperedBinary(t *testing.T) {
+	home := t.TempDir()
+	dotAish := filepath.Join(home, ".aish")
+	if err := os.MkdirAll(dotAish, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFakeManifest(t, dotAish, "ollama")
+
+	// Find the binary path from the installed manifest, then swap
+	// its contents to simulate a post-install tamper.
+	entries, err := proto.Load(filepath.Join(dotAish, proto.DirName), nil)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("load: %v entries=%d", err, len(entries))
+	}
+	binPath := entries[0].Manifest.BinaryPath
+	if err := os.WriteFile(binPath, []byte("tampered\n"), 0o755); err != nil {
+		t.Fatalf("tamper: %v", err)
+	}
+
+	var warn bytes.Buffer
+	got := selectRegistryInferencePlugin(dotAish, &warn)
+	if got != "" {
+		t.Fatalf("expected empty selection on tampered binary, got %q", got)
+	}
+	if !strings.Contains(warn.String(), "sha256 does not match") {
+		t.Fatalf("expected sha256 mismatch warning, got %q", warn.String())
+	}
+}
+
+func TestSelectRegistryInferencePlugin_MissingBinaryFallsBack(t *testing.T) {
+	home := t.TempDir()
+	dotAish := filepath.Join(home, ".aish")
+	if err := os.MkdirAll(dotAish, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFakeManifest(t, dotAish, "ollama")
+
+	// Delete the binary entirely.
+	entries, _ := proto.Load(filepath.Join(dotAish, proto.DirName), nil)
+	if err := os.Remove(entries[0].Manifest.BinaryPath); err != nil {
+		t.Fatalf("remove binary: %v", err)
+	}
+
+	var warn bytes.Buffer
+	got := selectRegistryInferencePlugin(dotAish, &warn)
+	if got != "" {
+		t.Fatalf("expected empty selection when binary missing, got %q", got)
+	}
+	if !strings.Contains(warn.String(), "cannot read registered binary") {
+		t.Fatalf("expected missing-binary warning, got %q", warn.String())
+	}
+}
+
 func TestResolveTier_PluginIsBuiltin(t *testing.T) {
 	s := withFakeHome(t, t.TempDir())
 	// ResolveTier's switch lookup is what we're asserting here —

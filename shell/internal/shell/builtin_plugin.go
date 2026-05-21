@@ -171,16 +171,56 @@ func (s *Shell) locatePluginCLI() string {
 // selectRegistryInferencePlugin is the bridge between the registry
 // loader and the cache.PluginClient. Called by tryStartPlugin during
 // shell boot; returns the absolute binary path of a registered
-// inference plugin, or "" when the registry is empty or absent.
+// inference plugin, or "" when the registry is empty, absent, or the
+// selected binary fails its hash check.
 //
 // The shell uses this BEFORE falling back to DefaultPluginBinary on
 // PATH. Empty result is the normal pre-v0.3-2 path.
+//
+// Binary-hash verification at spawn: a manifest can have a valid
+// signature but reference a tampered (or stale) binary on disk. We
+// re-hash the binary and compare against manifest.SHA256 here so a
+// post-install swap is caught before we spawn an untrusted child.
+// The cost is one SHA-256 read per startup — acceptable for the
+// security guarantee.
 func selectRegistryInferencePlugin(dotAish string, warn io.Writer) string {
 	if dotAish == "" {
 		return ""
 	}
 	sel, ok := plugins.Select(proto.KindInference, dotAish, warn)
 	if !ok {
+		return ""
+	}
+	// Re-hash the binary to confirm it hasn't been swapped since
+	// install time. The shell-side check is independent of the CLI's
+	// `plugin verify` subcommand — both surface the same integrity
+	// guarantee but the shell-side one runs unconditionally at boot.
+	gotHash, err := proto.HashBinary(sel.BinaryPath)
+	if err != nil {
+		if warn != nil {
+			_, _ = io.WriteString(warn,
+				"aish: plugins: cannot read registered binary "+sel.BinaryPath+": "+err.Error()+
+					" — falling back to PATH lookup\n")
+		}
+		return ""
+	}
+	// Reload the manifest to compare hashes. Cheap — JSON parse only.
+	entries := plugins.All(dotAish, nil)
+	var manifestHash string
+	for _, e := range entries {
+		if e.Manifest.Name == sel.Name {
+			manifestHash = e.Manifest.SHA256
+			break
+		}
+	}
+	if manifestHash != "" && gotHash != manifestHash {
+		if warn != nil {
+			_, _ = io.WriteString(warn,
+				"aish: plugins: binary "+sel.BinaryPath+" sha256 does not match manifest "+
+					"(expected "+manifestHash+" got "+gotHash+
+					") — falling back to PATH lookup; run `plugin verify "+sel.Name+
+					"` for details\n")
+		}
 		return ""
 	}
 	return sel.BinaryPath
