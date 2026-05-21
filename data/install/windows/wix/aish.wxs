@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  aish — WiX 4 MSI source (v1.0-1 STUB)
+
+  This file is the source for the WiX MSI build path. The build itself
+  is dormant in v1.0-1: scripts/win/build-msi.ps1 produces an MSI when
+  invoked, but the release-windows.yml `windows-msi` job is gated
+  behind vars.AISH_WINDOWS_RUNNER_ENABLED (currently unset).
+
+  TODO(v1.0-1b): regenerate the Product/Package Id once the cert lands
+  and the first real release ships. The placeholder GUIDs below are
+  STABLE for the dev path so iterative builds don't fight Windows
+  Installer's upgrade rules.
+
+  Build manually:
+    wix build -arch x64 \
+        -define "AishVersion=1.0.0.0" \
+        -define "AishBinary=dist\aish-windows-amd64.exe" \
+        -out dist\aish-windows-amd64.msi aish.wxs
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="aish"
+           Manufacturer="Convergent Systems Co"
+           Version="$(AishVersion)"
+           UpgradeCode="2C5F8B3E-A1D4-4F7C-B6E5-9D2A1B3C4D5E"
+           Scope="perUser">
+
+    <SummaryInformation
+        Description="aish — AI-native, shell-native shell"
+        Manufacturer="Convergent Systems Co"
+        Keywords="shell, ai, cli" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <MajorUpgrade
+        DowngradeErrorMessage="A newer version of aish is already installed." />
+
+    <Feature Id="Main" Title="aish" Level="1">
+      <ComponentGroupRef Id="AishComponents" />
+    </Feature>
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsDir" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="aish" />
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="AishComponents" Directory="INSTALLFOLDER">
+      <Component Id="AishExe" Guid="3D6E9C4F-B2E5-5A8D-C7F6-AE3B2C4D5F6E">
+        <File Id="AishExeFile"
+              Source="$(AishBinary)"
+              Name="aish.exe"
+              KeyPath="yes" />
+      </Component>
+
+      <!-- PATH augmentation: appends the install folder to the per-user
+           PATH so `aish` resolves from any new shell. Removed on
+           uninstall via System="no". -->
+      <Component Id="PathEnv" Guid="4E7FAD50-C3F6-6B9E-D807-BF4C3D5E607F">
+        <Environment Id="AishPath"
+                     Name="PATH"
+                     Value="[INSTALLFOLDER]"
+                     Permanent="no"
+                     Part="last"
+                     Action="set"
+                     System="no" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\ConvergentSystems\aish"
+                       Name="Installed"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Package>
+</Wix>

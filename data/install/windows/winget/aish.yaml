@@ -1,0 +1,62 @@
+# aish — winget installer manifest TEMPLATE (v1.0-1)
+#
+# This file is the SOURCE OF TRUTH for the winget-pkgs manifest shape.
+# It is NOT the file submitted to microsoft/winget-pkgs — that file is
+# the result of `scripts/win/hydrate-winget.sh` filling in the
+# @@VERSION@@, @@AMD64_SHA256@@, and @@ARM64_SHA256@@ placeholders at
+# release time.
+#
+# winget-pkgs publication is a deliberate human step in v1.0-1. The
+# wingetcreate flow is documented in scripts/win/README.md.
+#
+# Schema reference:
+#   https://github.com/microsoft/winget-cli/blob/master/doc/ManifestSpecv1.6.0.md
+# Lint locally with:
+#   wingetcreate validate aish.yaml
+
+PackageIdentifier: ConvergentSystems.aish
+PackageVersion: "@@VERSION@@"
+PackageName: aish
+Publisher: Convergent Systems Co
+PublisherUrl: https://github.com/convergent-systems-co
+PublisherSupportUrl: https://github.com/convergent-systems-co/aish/issues
+License: AGPL-3.0
+LicenseUrl: https://github.com/convergent-systems-co/aish/blob/main/LICENSE
+ShortDescription: The AI-native, shell-native, OS-insensitive, fully reversible shell.
+Description: |
+  aish is a shell designed for the AI era. Pure-Go, cross-platform,
+  with an intent cache that converts natural language to native shell
+  commands. Windows is a first-class target, not a port — translation
+  layer understands Windows idioms with the same depth as POSIX.
+Moniker: aish
+Tags:
+  - shell
+  - ai
+  - cli
+  - powershell
+  - windows-terminal
+  - cross-platform
+Homepage: https://github.com/convergent-systems-co/aish
+ManifestType: singleton
+ManifestVersion: 1.6.0
+
+InstallerType: portable
+ReleaseDate: ""
+Commands:
+  - aish
+
+Installers:
+  - Architecture: x64
+    InstallerUrl: "https://github.com/convergent-systems-co/aish/releases/download/v@@VERSION@@/aish-windows-amd64.exe"
+    InstallerSha256: "@@AMD64_SHA256@@"
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: aish-windows-amd64.exe
+        PortableCommandAlias: aish
+  - Architecture: arm64
+    InstallerUrl: "https://github.com/convergent-systems-co/aish/releases/download/v@@VERSION@@/aish-windows-arm64.exe"
+    InstallerSha256: "@@ARM64_SHA256@@"
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: aish-windows-arm64.exe
+        PortableCommandAlias: aish
