@@ -3,12 +3,12 @@
 // over that AST:
 //
 //   - Run     — execute each statement via a Runner abstraction (the
-//               shell wires this to its normal dispatch tier).
+//     shell wires this to its normal dispatch tier).
 //   - Explain — emit a deterministic, numbered, plain-language
-//               description (optional LLM enrichment is gated).
+//     description (optional LLM enrichment is gated).
 //   - Migrate — emit an aish-native script that, when run via
-//               `aish run`, reproduces the observable behavior of
-//               the input script.
+//     `aish run`, reproduces the observable behavior of
+//     the input script.
 //
 // MVP scope ("the 80% list") is documented in the package plan at
 // .artifacts/plans/v0.2-4.md and surfaced through `Unknown` nodes
@@ -150,8 +150,8 @@ const (
 // glob expressions before `)`; the parser does NOT expand them.
 type Case struct {
 	BaseStmt
-	Word  string
-	Arms  []CaseArm
+	Word string
+	Arms []CaseArm
 }
 
 type CaseArm struct {

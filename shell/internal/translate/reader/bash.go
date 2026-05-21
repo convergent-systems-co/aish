@@ -251,6 +251,7 @@ func classifyUnsupported(line string) (string, bool) {
 // Header form: we accept both
 //   - `if TEST; then`   (single-line header)
 //   - `if TEST`         (with `then` on the next line)
+//
 // — but the body terminator is always the `then`/`else`/`elif`/`fi`
 // keyword in first position.
 func parseIf(lines []physicalLine, idx int) (translate.Statement, int) {
@@ -497,7 +498,9 @@ func skipCloseBrace(lines []physicalLine, idx int) int {
 }
 
 // consumeUntilKeyword reads the header of a control-flow construct:
-//   `KW <words…> [; KW2]`
+//
+//	`KW <words…> [; KW2]`
+//
 // or, when KW2 is on the next line, just `KW <words…>` with KW2 on
 // the following line's first token. Returns the parsed Test statement
 // and the index of the line carrying KW2.

@@ -9,7 +9,7 @@ import (
 // Migrate emits an aish-native script equivalent to script. Comments
 // are preserved verbatim; Unknown nodes become
 //
-//   # aish: MIGRATE-TODO: <reason> — <original line>
+//	# aish: MIGRATE-TODO: <reason> — <original line>
 //
 // so the user sees what didn't translate. Control-flow constructs
 // emit aish-flavored syntax: bash-style `if … fi` and `for … done`
