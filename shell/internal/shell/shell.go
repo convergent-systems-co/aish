@@ -17,7 +17,6 @@ import (
 
 	"github.com/convergent-systems-co/aish/shell/internal/cache"
 	"github.com/convergent-systems-co/aish/shell/internal/env"
-	"github.com/convergent-systems-co/aish/shell/internal/exec"
 	"github.com/convergent-systems-co/aish/shell/internal/history"
 	"github.com/convergent-systems-co/aish/shell/internal/parser"
 	"github.com/convergent-systems-co/aish/shell/internal/telemetry"
@@ -522,14 +521,14 @@ func (s *Shell) runExternal(cmdline string, stdin io.Reader, stdout, stderr io.W
 		}
 	}
 	start := time.Now()
-	exitCode, runErr := exec.Run(
-		context.Background(),
-		pipeline,
-		s.env.Environ(),
-		stdin,
-		stdout,
-		stderr,
-	)
+	// v0.2-2 dispatch seam: when the pipeline is a single command,
+	// the parent stdin/stdout are *os.File handles AND the parent
+	// stdin is a real TTY AND the command is on the curated
+	// interactive list (vim, less, top, htop, ssh, az, …), route
+	// through exec.RunPTY so the child sees a real controlling
+	// terminal. Every other case (pipelines, scripted stdin, non-
+	// interactive commands) stays on the existing stdio path.
+	exitCode, runErr := s.runPipeline(pipeline, stdin, stdout, stderr)
 	dur := time.Since(start)
 	finalExit := exitCode
 	if runErr != nil {
