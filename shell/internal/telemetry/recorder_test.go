@@ -232,6 +232,33 @@ func TestRecorder_Close_Idempotent(t *testing.T) {
 	}
 }
 
+func TestRecorder_Close_NoLocalFileWhenLocalOptOut(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	// Pre-seed consent with local opt-out.
+	consentFile := filepath.Join(home, ConsentFilename)
+	if err := writeFile(consentFile, "[telemetry]\nopt_in_local = false\nopt_in_aggregate = false\n"); err != nil {
+		t.Fatalf("seed consent: %v", err)
+	}
+	r, err := New(Config{DotAishDir: home})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Counters still tick in memory.
+	r.After(nil, "echo hi", 0, 10*time.Millisecond)
+	if r.CurrentCounters().Commands != 1 {
+		t.Errorf("Commands didn't tick with local opt-out")
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// No session file persisted.
+	rows, _ := ListSessions(home, 10)
+	if len(rows) != 0 {
+		t.Errorf("local opt-out wrote %d rows, want 0", len(rows))
+	}
+}
+
 func TestRecorder_NilSafe(t *testing.T) {
 	t.Parallel()
 	var r *Recorder
