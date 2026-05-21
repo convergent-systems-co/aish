@@ -20,6 +20,7 @@ import (
 	"github.com/convergent-systems-co/aish/shell/internal/exec"
 	"github.com/convergent-systems-co/aish/shell/internal/history"
 	"github.com/convergent-systems-co/aish/shell/internal/parser"
+	"github.com/convergent-systems-co/aish/shell/internal/telemetry"
 	"github.com/convergent-systems-co/aish/shell/internal/theme"
 )
 
@@ -52,10 +53,15 @@ type Shell struct {
 	// shell still runs but every destructive command is permanent
 	// (degrades gracefully per the same pattern as the cache).
 	history *history.History
+	// telemetry is the v0.1-5 measurement interceptor — per-session
+	// counters + cost tracking + opt-in aggregate queue. nil when
+	// ~/.aish is unwritable; `aish stats` then prints "telemetry
+	// not available."
+	telemetry *telemetry.Recorder
 	// interceptors is the registered set of PreCommand/PostCommand
-	// observers. History registers as one entry; telemetry (v0.1-5,
-	// TL2) will register a second. Order is insertion order for
-	// Before; reverse for After (see interceptor.go).
+	// observers. History registers as one entry; telemetry (v0.1-5)
+	// registers a second. Order is insertion order for Before;
+	// reverse for After (see interceptor.go).
 	interceptors []Interceptor
 }
 
@@ -106,6 +112,11 @@ func New() *Shell {
 	// "history not available" — the shell keeps running.
 	s.openHistory(e)
 
+	// Open the v0.1-5 telemetry recorder. On failure, s.telemetry
+	// stays nil and `aish stats` will print "telemetry not
+	// available" — the shell keeps running.
+	s.openTelemetry(e)
+
 	return s
 }
 
@@ -135,6 +146,12 @@ func (s *Shell) Close() error {
 			firstErr = err
 		}
 		s.history = nil
+	}
+	if s.telemetry != nil {
+		if err := s.telemetry.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		s.telemetry = nil
 	}
 	s.interceptors = nil
 	return firstErr
@@ -191,6 +208,59 @@ func (s *Shell) openHistory(e *env.Env) {
 	h.SetCwdFn(func() string { return s.cwd })
 	s.history = h
 	s.interceptors = append(s.interceptors, h)
+}
+
+// openTelemetry constructs the v0.1-5 telemetry.Recorder and
+// registers it on the interceptor slice. Like openHistory, this is
+// best-effort: any failure (HOME missing, mkdir denied, recorder
+// constructor failure) leaves s.telemetry nil and the `aish stats`
+// built-in returns "telemetry not available."
+//
+// The recorder reads cache hit/miss deltas via a thin adapter
+// (cacheStatsAdapter) so telemetry never imports the cache package
+// directly — the dependency stays one-way.
+func (s *Shell) openTelemetry(e *env.Env) {
+	home := homeDir(e)
+	if home == "" {
+		return
+	}
+	dotAish := filepath.Join(home, ".aish")
+	if err := os.MkdirAll(dotAish, 0o755); err != nil {
+		return
+	}
+	cfg := telemetry.Config{
+		DotAishDir: dotAish,
+	}
+	if s.cacheStore != nil {
+		cfg.CacheReader = &cacheStatsAdapter{store: s.cacheStore}
+	}
+	if s.cachePlugin != nil {
+		// Capture once: the plugin's lifetime equals the shell's.
+		cfg.PluginActive = func() bool { return true }
+	} else {
+		cfg.PluginActive = func() bool { return false }
+	}
+	rec, err := telemetry.New(cfg)
+	if err != nil {
+		return
+	}
+	s.telemetry = rec
+	s.interceptors = append(s.interceptors, rec)
+}
+
+// cacheStatsAdapter satisfies telemetry.CacheStatsReader against a
+// *cache.Store, unwrapping the cache.Stats struct so the telemetry
+// package doesn't need to know about it.
+type cacheStatsAdapter struct {
+	store *cache.Store
+}
+
+func (a *cacheStatsAdapter) StatsSnapshot() (int64, int64, error) {
+	st, err := a.store.Stats()
+	if err != nil {
+		return 0, 0, err
+	}
+	return st.Hits, st.Misses, nil
 }
 
 // tryStartPlugin spawns the inference plugin when a bearer key is set
@@ -364,6 +434,14 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		rest := strings.TrimSpace(strings.TrimPrefix(line, "cache"))
 		args := strings.Fields(rest)
 		s.SetLastExit(s.cacheBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `stats [N]`. Per v0.1-5 task #43 — local dashboard.
+	if line == "stats" || strings.HasPrefix(line, "stats ") || strings.HasPrefix(line, "stats\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "stats"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.statsBuiltin(args, stdout, stderr))
 		return nil
 	}
 
