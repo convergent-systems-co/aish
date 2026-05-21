@@ -1,7 +1,6 @@
 package shell
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -12,19 +11,52 @@ import (
 	"github.com/convergent-systems-co/aish/shell/internal/secrets"
 )
 
-// bufReader wraps stdin in a single *bufio.Reader so the passphrase
-// read and any subsequent value read share the same buffer. Without
-// this, two separate bufio.Reader wrappers would each pull bytes from
-// stdin into their private buffer; the second read would see EOF even
-// though the value bytes were already consumed by the first wrapper.
-//
-// Idempotent — if stdin is already a *bufio.Reader we use it directly
-// so callers that have already wrapped don't get a double buffer.
-func bufReader(stdin io.Reader) *bufio.Reader {
-	if br, ok := stdin.(*bufio.Reader); ok {
-		return br
+// stripPkgPrefix turns "secrets: foo" into "secret: foo" so error
+// messages read consistently with the rest of the built-in's output
+// (we use the verb "secret", the package uses "secrets"). Leaves
+// other prefixes alone.
+func stripPkgPrefix(msg string) string {
+	const pkg = "secrets: "
+	if strings.HasPrefix(msg, pkg) {
+		return "secret: " + msg[len(pkg):]
 	}
-	return bufio.NewReader(stdin)
+	return "secret: " + msg
+}
+
+// readLineRaw reads through the first \n on r byte-by-byte and
+// returns the preceding bytes with a trailing \r stripped. EOF before
+// any data returns ("", nil) so callers can distinguish "user typed
+// nothing" from "stream broke."
+//
+// IMPORTANT: this MUST NOT use bufio. The shell's top-level REPL
+// drives stdin byte-by-byte explicitly (see shell.go's readLine
+// comment about issue #167) — buffered prefetch here would swallow
+// the next REPL line (e.g. the follow-up `secret get` after a
+// `secret set`).
+func readLineRaw(r io.Reader) ([]byte, error) {
+	var line []byte
+	var buf [1]byte
+	for {
+		n, err := r.Read(buf[:])
+		if n > 0 {
+			if buf[0] == '\n' {
+				if len(line) > 0 && line[len(line)-1] == '\r' {
+					line = line[:len(line)-1]
+				}
+				return line, nil
+			}
+			line = append(line, buf[0])
+		}
+		if err != nil {
+			if err == io.EOF {
+				if len(line) > 0 && line[len(line)-1] == '\r' {
+					line = line[:len(line)-1]
+				}
+				return line, nil
+			}
+			return line, fmt.Errorf("secrets: read: %w", err)
+		}
+	}
 }
 
 // secretBuiltin implements the `aish secret …` built-in. Subcommands:
@@ -47,16 +79,15 @@ func (s *Shell) secretBuiltin(args []string, stdin io.Reader, stdout, stderr io.
 		fmt.Fprintln(stdout, secretUsage())
 		return 0
 	}
-	br := bufReader(stdin)
 	switch args[0] {
 	case "set":
-		return s.secretSet(args[1:], br, stdout, stderr)
+		return s.secretSet(args[1:], stdin, stdout, stderr)
 	case "get":
-		return s.secretGet(args[1:], br, stdout, stderr)
+		return s.secretGet(args[1:], stdin, stdout, stderr)
 	case "list", "ls":
-		return s.secretList(args[1:], br, stdout, stderr)
+		return s.secretList(args[1:], stdin, stdout, stderr)
 	case "rm", "remove", "delete":
-		return s.secretRm(args[1:], br, stdout, stderr)
+		return s.secretRm(args[1:], stdin, stdout, stderr)
 	case "lock":
 		// Optional: zero the cached key before process exit.
 		s.secretLock()
@@ -91,7 +122,7 @@ for your passphrase. Choose a strong one — there is no recovery path.
 // openVault unlocks the user's vault, caching the derived key on the
 // Shell so subsequent calls in this session don't re-prompt. On a
 // fresh vault the KDF cost parameters are printed once to stderr.
-func (s *Shell) openVault(prompt string, stdin *bufio.Reader, stdout, stderr io.Writer) (*secrets.Vault, error) {
+func (s *Shell) openVault(prompt string, stdin io.Reader, stdout, stderr io.Writer) (*secrets.Vault, error) {
 	home := homeDir(s.env)
 	if home == "" {
 		return nil, errors.New("secret: HOME not set; cannot locate vault")
@@ -136,7 +167,7 @@ func (s *Shell) openVault(prompt string, stdin *bufio.Reader, stdout, stderr io.
 
 // secretSet handles `secret set NAME`. Reads the value from stdin
 // (after the passphrase if not cached), then encrypts + persists.
-func (s *Shell) secretSet(args []string, stdin *bufio.Reader, stdout, stderr io.Writer) int {
+func (s *Shell) secretSet(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
 		fmt.Fprintln(stderr, "Usage: secret set NAME")
 		return 1
@@ -145,7 +176,7 @@ func (s *Shell) secretSet(args []string, stdin *bufio.Reader, stdout, stderr io.
 
 	v, err := s.openVault("Vault passphrase: ", stdin, stdout, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "secret: %s\n", err.Error())
+		fmt.Fprintf(stderr, "%s\n", stripPkgPrefix(err.Error()))
 		return 2
 	}
 	defer v.Close()
@@ -156,15 +187,15 @@ func (s *Shell) secretSet(args []string, stdin *bufio.Reader, stdout, stderr io.
 		s.secretCostShown = true
 	}
 
-	value, err := secrets.ReadValueFrom(stdin)
+	value, err := readValueLine(stdin)
 	if err != nil {
-		fmt.Fprintf(stderr, "secret: %s\n", err.Error())
+		fmt.Fprintf(stderr, "%s\n", stripPkgPrefix(err.Error()))
 		return 1
 	}
 	defer secrets.Zero(value)
 
 	if err := v.Set(name, value); err != nil {
-		fmt.Fprintf(stderr, "secret: %s\n", err.Error())
+		fmt.Fprintf(stderr, "%s\n", stripPkgPrefix(err.Error()))
 		return 2
 	}
 	fmt.Fprintf(stdout, "secret: stored %s\n", name)
@@ -173,7 +204,7 @@ func (s *Shell) secretSet(args []string, stdin *bufio.Reader, stdout, stderr io.
 
 // secretGet handles `secret get NAME`. Decrypts and writes to the OS
 // clipboard. NEVER prints the value to stdout/stderr.
-func (s *Shell) secretGet(args []string, stdin *bufio.Reader, stdout, stderr io.Writer) int {
+func (s *Shell) secretGet(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
 		fmt.Fprintln(stderr, "Usage: secret get NAME")
 		return 1
@@ -182,7 +213,7 @@ func (s *Shell) secretGet(args []string, stdin *bufio.Reader, stdout, stderr io.
 
 	v, err := s.openVault("Vault passphrase: ", stdin, stdout, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "secret: %s\n", err.Error())
+		fmt.Fprintf(stderr, "%s\n", stripPkgPrefix(err.Error()))
 		return 2
 	}
 	defer v.Close()
@@ -213,14 +244,14 @@ func (s *Shell) secretGet(args []string, stdin *bufio.Reader, stdout, stderr io.
 }
 
 // secretList handles `secret list`. Prints sorted names, no values.
-func (s *Shell) secretList(args []string, stdin *bufio.Reader, stdout, stderr io.Writer) int {
+func (s *Shell) secretList(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) != 0 {
 		fmt.Fprintln(stderr, "Usage: secret list")
 		return 1
 	}
 	v, err := s.openVault("Vault passphrase: ", stdin, stdout, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "secret: %s\n", err.Error())
+		fmt.Fprintf(stderr, "%s\n", stripPkgPrefix(err.Error()))
 		return 2
 	}
 	defer v.Close()
@@ -231,7 +262,7 @@ func (s *Shell) secretList(args []string, stdin *bufio.Reader, stdout, stderr io
 }
 
 // secretRm handles `secret rm NAME`. Wipes the entry from the vault.
-func (s *Shell) secretRm(args []string, stdin *bufio.Reader, stdout, stderr io.Writer) int {
+func (s *Shell) secretRm(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
 		fmt.Fprintln(stderr, "Usage: secret rm NAME")
 		return 1
@@ -239,7 +270,7 @@ func (s *Shell) secretRm(args []string, stdin *bufio.Reader, stdout, stderr io.W
 	name := args[0]
 	v, err := s.openVault("Vault passphrase: ", stdin, stdout, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "secret: %s\n", err.Error())
+		fmt.Fprintf(stderr, "%s\n", stripPkgPrefix(err.Error()))
 		return 2
 	}
 	defer v.Close()
@@ -248,7 +279,7 @@ func (s *Shell) secretRm(args []string, stdin *bufio.Reader, stdout, stderr io.W
 			fmt.Fprintf(stderr, "secret: %s not found\n", name)
 			return 1
 		}
-		fmt.Fprintf(stderr, "secret: %s\n", err.Error())
+		fmt.Fprintf(stderr, "%s\n", stripPkgPrefix(err.Error()))
 		return 2
 	}
 	fmt.Fprintf(stdout, "secret: removed %s\n", name)
@@ -261,7 +292,7 @@ func (s *Shell) secretRm(args []string, stdin *bufio.Reader, stdout, stderr io.W
 //
 // Prompt goes to stderr to keep stdout clean for callers that pipe
 // `secret list` etc.
-func readPassphrase(prompt string, stdin *bufio.Reader, stderr io.Writer) ([]byte, error) {
+func readPassphrase(prompt string, stdin io.Reader, stderr io.Writer) ([]byte, error) {
 	if prompt != "" {
 		// We don't use the TTY no-echo path in the built-in because the
 		// dispatch layer drives stdin as an io.Reader, not a file
@@ -270,7 +301,28 @@ func readPassphrase(prompt string, stdin *bufio.Reader, stderr io.Writer) ([]byt
 		// (see secrets.ReadPassphrase).
 		fmt.Fprint(stderr, prompt)
 	}
-	return secrets.ReadPassphraseFrom(stdin)
+	line, err := readLineRaw(stdin)
+	if err != nil {
+		return nil, err
+	}
+	if len(line) == 0 {
+		return nil, errors.New("secrets: empty passphrase")
+	}
+	return line, nil
+}
+
+// readValueLine reads a single line from stdin and returns it as the
+// secret value to store. Empty values are rejected — `secret set NAME`
+// with nothing to set is a mistake (the caller meant `rm`).
+func readValueLine(stdin io.Reader) ([]byte, error) {
+	line, err := readLineRaw(stdin)
+	if err != nil {
+		return nil, err
+	}
+	if len(line) == 0 {
+		return nil, errors.New("secrets: empty value")
+	}
+	return line, nil
 }
 
 // secretLock zeroes the cached passphrase. Safe to call multiple times.

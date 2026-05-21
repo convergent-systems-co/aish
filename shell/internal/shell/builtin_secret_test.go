@@ -236,6 +236,52 @@ func TestSecret_ResolveTier(t *testing.T) {
 	}
 }
 
+// TestSecret_ByteByByteStdinDiscipline — the secret built-ins MUST
+// read stdin byte-by-byte (no bufio prefetch) so a follow-up REPL
+// command in the same input stream is preserved. The test drives the
+// shell's full Run loop with a stdin that contains `secret set`, the
+// passphrase, the value, AND a follow-up command — the follow-up
+// command MUST still execute (proving the secret built-in did not
+// over-read).
+func TestSecret_ByteByByteStdinDiscipline(t *testing.T) {
+	s, _ := secretTestShell(t)
+	s.SetClipboardFnForTesting(func([]byte) error { return nil })
+	// stdin: `secret set DEMO`, passphrase, value, `secret list`, EOF.
+	// If readLineRaw works correctly, both `secret set DEMO` and
+	// `secret list` execute. If we buffered too aggressively, the
+	// list command would be lost in the bufio buffer of `set`.
+	stdin := strings.NewReader("secret set DEMO\ntest-fake-passphrase-Z\ntest-fake-value-Z\nsecret list\n")
+	var stdout, stderr bytes.Buffer
+	if err := s.Run(stdin, &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Confirm both commands ran. `set` writes "stored DEMO"; `list`
+	// emits the name "DEMO".
+	out := stdout.String()
+	if !strings.Contains(out, "stored DEMO") {
+		t.Errorf("set DEMO did not run (no 'stored DEMO'):\n%s", out)
+	}
+	if !strings.Contains(out, "DEMO") {
+		t.Errorf("list did not run after set; full stdout:\n%s", out)
+	}
+	// More telling: `secret list` emits the name on its own line in
+	// the stdout buffer; the prompt then re-renders for the next
+	// REPL turn. Look for the name preceded by EITHER a newline or
+	// the start of a line so we don't false-positive on a literal
+	// "DEMO" inside a prompt string. The "stored DEMO" line comes
+	// from `set` and is also valid evidence — but we want the SECOND
+	// occurrence (the list output) to confirm both ran.
+	if strings.Count(out, "DEMO") < 2 {
+		t.Errorf("expected DEMO to appear twice (stored + list); got:\n%s", out)
+	}
+	if strings.Contains(out, "test-fake-value-Z") {
+		t.Errorf("value leaked to stdout:\n%s", out)
+	}
+	if strings.Contains(stderr.String(), "test-fake-value-Z") {
+		t.Errorf("value leaked to stderr:\n%s", stderr.String())
+	}
+}
+
 // TestSecret_DispatchThroughShell — sending `secret set NAME` through
 // the top-level dispatcher works end-to-end (proves the dispatch
 // branch is wired).
