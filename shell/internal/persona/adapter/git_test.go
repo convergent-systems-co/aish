@@ -62,6 +62,7 @@ func requireGit(t *testing.T) {
 func readGitConfig(t *testing.T, home, key string) (string, bool) {
 	t.Helper()
 	cmd := exec.Command("git", "config", "--global", "--get", key)
+	cmd.Dir = home
 	cmd.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, ".config"))
 	out, err := cmd.Output()
 	if err != nil {

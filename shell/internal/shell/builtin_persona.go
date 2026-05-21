@@ -251,9 +251,18 @@ func (s *Shell) personaSet(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name := args[0]
-	if _, ok := s.personas.Get(name); !ok {
+	p, ok := s.personas.Get(name)
+	if !ok {
 		fmt.Fprintf(stderr, "persona: unknown persona %q (try `persona list`)\n", name)
 		return 1
+	}
+	// v0.3-3 (#104): personas with declared external bindings route
+	// through personaSetAtomic so SSH / cloud / kube / git mutate
+	// atomically. Personas with no [external] block fall through to
+	// the legacy single-write path below — bit-identical to pre-#104
+	// behavior (asserted by TestAtomicPersonaSwitch_NoBindingsPreservesLegacyBehaviour).
+	if hasAnyExternalBinding(p) {
+		return s.personaSetAtomic(name, stdout, stderr)
 	}
 	home := homeDir(s.env)
 	if home == "" {
@@ -268,6 +277,14 @@ func (s *Shell) personaSet(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "persona: active = %s\n", name)
 	s.recordPersonaUse(name)
 	return 0
+}
+
+// hasAnyExternalBinding reports whether the persona declares one or
+// more [external.*] sub-blocks. Sole bridge between the legacy
+// single-write path and the atomic-switch path.
+func hasAnyExternalBinding(p persona.Persona) bool {
+	b := p.ExternalBindings
+	return b.SSH != nil || b.Cloud != nil || b.Kube != nil || b.Git != nil
 }
 
 // personaCreate runs the guided-bootstrap flow for #121. It reads

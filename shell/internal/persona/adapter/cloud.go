@@ -75,6 +75,15 @@ func (e *EnvSession) Get(key string) (string, bool) {
 	return v, ok
 }
 
+// SetForTest seeds the session with a pre-existing value. Used by
+// the shell builtin to seed AWS_PROFILE from the Shell's env before
+// Capture, and by tests to construct sessions with specific
+// pre-states. Production code does not otherwise mutate values
+// directly — the Apply path is the only mutator.
+func (e *EnvSession) SetForTest(key, value string) {
+	e.values[key] = value
+}
+
 // AzureRunner abstracts the `az` invocation so tests can supply a
 // recording stub on $PATH (or a direct fake here). Production uses
 // execAzureRunner.

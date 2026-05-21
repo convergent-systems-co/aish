@@ -57,6 +57,17 @@ func (e execGitRunner) Run(ctx context.Context, args ...string) (string, error) 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if len(e.extraEnv) > 0 {
 		cmd.Env = append(cmd.Environ(), e.extraEnv...)
+		// When the runner was constructed with a sandbox HOME, pin
+		// CWD to the same path so `git config --global` doesn't
+		// inherit a stale CWD from the caller. (Real `git config
+		// --global` cares about CWD because it walks up looking for
+		// `.git/`; a missing CWD aborts with status 128.)
+		for _, kv := range e.extraEnv {
+			if strings.HasPrefix(kv, "HOME=") {
+				cmd.Dir = strings.TrimPrefix(kv, "HOME=")
+				break
+			}
+		}
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -65,11 +76,16 @@ func (e execGitRunner) Run(ctx context.Context, args ...string) (string, error) 
 	return stdout.String(), wrapGitErr(err, args, stderr.String())
 }
 
-// gitNotPresentErr is returned by Run when `git config --get` exits
-// with status 1 (the documented "key not present" signal). The
+// ErrGitKeyNotPresent is returned by Run when `git config --get`
+// exits with status 1 (the documented "key not present" signal). The
 // adapter treats it as "captured value is empty" rather than a
-// transaction failure.
-var gitNotPresentErr = errors.New("git: key not present")
+// transaction failure. Exported so test-side GitRunner stubs can
+// emit the same sentinel.
+var ErrGitKeyNotPresent = errors.New("git: key not present")
+
+// gitNotPresentErr is the internal alias retained for the existing
+// uses inside this file. Will be folded away in a follow-up.
+var gitNotPresentErr = ErrGitKeyNotPresent
 
 func wrapGitErr(err error, args []string, stderr string) error {
 	if err == nil {

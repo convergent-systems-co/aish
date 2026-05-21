@@ -156,6 +156,12 @@ type Shell struct {
 	// installation done at startup. Called from Close so a non-
 	// interactive aish invocation doesn't leave global state altered.
 	restoreShellSignals func()
+	// atomicDeps holds adapter overrides used by personaSetAtomic
+	// (T5 of #104). Production leaves this zero-value — each adapter
+	// constructor picks its own host-bound default. Tests inject
+	// fake-agent dialers, sandbox HOMEs, recording AzureRunners, and
+	// stub GitRunners via SetAtomicDepsForTesting.
+	atomicDeps atomicDeps
 }
 
 // Options configures a Shell at construction time. Zero value means
