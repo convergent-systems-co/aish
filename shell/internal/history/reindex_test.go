@@ -1,10 +1,4 @@
-//go:build phase_b
-
 // T5 tests — reindex command + backfill path.
-//
-// Build-gated by `phase_b`; the seed commit ships these inert. Phase
-// B's coder wave lands reindex.go and the `aish history reindex`
-// subcommand in builtin_history.go.
 //
 // Acceptance criteria covered (from .artifacts/plans/112.md T5 + AC6,
 // AC7):

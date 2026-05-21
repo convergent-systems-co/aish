@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,8 @@ func (s *Shell) historyBuiltin(args []string, stdout, stderr io.Writer) int {
 		return s.historyCheckpoint(args[1:], stdout, stderr)
 	case "rollback":
 		return s.historyRollback(args[1:], stdout, stderr)
+	case "reindex":
+		return s.historyReindex(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		s.historyUsage(stdout)
 		return 0
@@ -63,6 +66,31 @@ func (s *Shell) historyUsage(w io.Writer) {
 	fmt.Fprintln(w, "  history purge --before <RFC3339-timestamp>")
 	fmt.Fprintln(w, "  history checkpoint <name>")
 	fmt.Fprintln(w, "  history rollback <name>")
+	fmt.Fprintln(w, "  history reindex")
+}
+
+// historyReindex implements `aish history reindex` — the v0.3-4 #112
+// backfill subcommand. Walks every event and (re-)embeds it under
+// the active EmbeddingProvider, skipping tainted commands and rows
+// already at the current model_id. Idempotent and resumable; safe
+// to interrupt and re-run.
+//
+// No flags in v0.3 — the subcommand is "do it" or "don't run it."
+// Future v0.4 work may add --batch-size and --concurrent (filed as
+// #203 follow-up).
+func (s *Shell) historyReindex(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, "aish: history reindex: usage: history reindex")
+		return 2
+	}
+	store := s.history.Store()
+	n, err := store.Reindex(context.Background())
+	if err != nil {
+		fmt.Fprintf(stderr, "aish: history reindex: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "reindexed %d event(s)\n", n)
+	return 0
 }
 
 func (s *Shell) historyList(args []string, stdout, stderr io.Writer) int {
