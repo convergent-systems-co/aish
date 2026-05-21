@@ -109,13 +109,20 @@ Usage: secret <subcommand>
 
   set NAME       read a value from stdin (TTY: no-echo) and store it
   get NAME       decrypt and write to the OS clipboard
-  list           list stored secret names (sorted; values never shown)
+  list [--all]   list stored secret names (sorted; values never shown)
+                 with an active persona, output is filtered to entries
+                 visible under that scope; --all overrides the filter
   rm NAME        delete the named entry
   lock           clear the session passphrase cache
 
 Values are stored encrypted under ~/.aish/vault/vault.json with
 Argon2id (KDF) + AES-256-GCM. The first command of a session prompts
 for your passphrase. Choose a strong one — there is no recovery path.
+
+When an aish persona is active, 'secret set' tags the new entry with
+the active persona name so 'secret list' (without --all) restricts
+visibility to that scope. Entries created before the persona engine
+existed (no labels) remain visible under any persona.
 `)
 }
 
@@ -194,6 +201,36 @@ func (s *Shell) secretSet(args []string, stdin io.Reader, stdout, stderr io.Writ
 	}
 	defer secrets.Zero(value)
 
+	// v0.3-fu-secrets #105: when a persona is active, tag the entry
+	// with the persona name so `secret list` can filter visibility
+	// per persona. On re-set of an existing entry, the existing
+	// labels are preserved (per Set's contract) — switching personas
+	// does not silently re-scope another persona's secret to yours.
+	if active := s.activePersona; active != "" {
+		// Only tag if there's no entry yet OR the entry has no
+		// labels OR the active persona isn't already in the label
+		// list. This keeps re-set idempotent and prevents quiet
+		// cross-persona overwrites.
+		existingLabels, _ := v.LabelsFor(name)
+		if len(existingLabels) == 0 {
+			if err := v.SetWithLabels(name, value, []string{active}); err != nil {
+				fmt.Fprintf(stderr, "%s\n", stripPkgPrefix(err.Error()))
+				return 2
+			}
+			fmt.Fprintf(stdout, "secret: stored %s (persona %s)\n", name, active)
+			return 0
+		}
+		// Existing entry already labeled — preserve labels, just
+		// rotate the value. We do not silently add the active
+		// persona to another persona's entry; the user can
+		// reassign explicitly with a future `secret label` form.
+		if err := v.Set(name, value); err != nil {
+			fmt.Fprintf(stderr, "%s\n", stripPkgPrefix(err.Error()))
+			return 2
+		}
+		fmt.Fprintf(stdout, "secret: stored %s (labels preserved: %v)\n", name, existingLabels)
+		return 0
+	}
 	if err := v.Set(name, value); err != nil {
 		fmt.Fprintf(stderr, "%s\n", stripPkgPrefix(err.Error()))
 		return 2
@@ -243,10 +280,28 @@ func (s *Shell) secretGet(args []string, stdin io.Reader, stdout, stderr io.Writ
 	return 0
 }
 
-// secretList handles `secret list`. Prints sorted names, no values.
+// secretList handles `secret list [--all]`. Prints sorted names, no
+// values.
+//
+// v0.3-fu-secrets #105: when a persona is active and `--all` is NOT
+// passed, the output is filtered to entries that are either
+// unlabeled OR carry the active persona name in their labels. The
+// `--all` flag is the documented escape hatch — auditable on the
+// command line.
 func (s *Shell) secretList(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(args) != 0 {
-		fmt.Fprintln(stderr, "Usage: secret list")
+	all := false
+	switch len(args) {
+	case 0:
+		// no flags, default scope
+	case 1:
+		if args[0] == "--all" || args[0] == "-a" {
+			all = true
+		} else {
+			fmt.Fprintln(stderr, "Usage: secret list [--all]")
+			return 1
+		}
+	default:
+		fmt.Fprintln(stderr, "Usage: secret list [--all]")
 		return 1
 	}
 	v, err := s.openVault("Vault passphrase: ", stdin, stdout, stderr)
@@ -255,7 +310,13 @@ func (s *Shell) secretList(args []string, stdin io.Reader, stdout, stderr io.Wri
 		return 2
 	}
 	defer v.Close()
-	for _, n := range v.List() {
+	var names []string
+	if all || s.activePersona == "" {
+		names = v.List()
+	} else {
+		names = v.ListWithLabel(s.activePersona)
+	}
+	for _, n := range names {
 		fmt.Fprintln(stdout, n)
 	}
 	return 0

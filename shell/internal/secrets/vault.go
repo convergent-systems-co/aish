@@ -212,7 +212,33 @@ func (v *Vault) Close() {
 // Overwrites any existing entry. Persists to disk before returning.
 // Caller is responsible for treating value as secret (the slice is
 // NOT zeroed by this function — the caller owns the buffer).
+//
+// Existing entries' Labels are PRESERVED on overwrite — Set is for
+// rotating values, not for re-labeling. Use SetWithLabels to change
+// the labels in the same write.
 func (v *Vault) Set(name string, value []byte) error {
+	return v.setInternal(name, value, nil, false)
+}
+
+// SetWithLabels is the v0.3-fu-secrets #105 entry-point for storing a
+// secret with a fixed label set. Labels are arbitrary tags consumed
+// by the shell layer (the persona scope is the first consumer);
+// nothing in the secrets package interprets them. An empty/nil
+// labels slice clears the entry's labels.
+//
+// Like Set, the value is encrypted with AES-256-GCM under the
+// vault's derived key; the caller still owns the buffer's lifecycle.
+func (v *Vault) SetWithLabels(name string, value []byte, labels []string) error {
+	return v.setInternal(name, value, labels, true)
+}
+
+// setInternal is the shared implementation. setLabels controls
+// whether the labels field is overwritten:
+//   - false: labels are PRESERVED from any existing entry (Set's
+//     semantics — value-rotation should not clear labels).
+//   - true: labels are REPLACED with the provided slice (which may
+//     be empty/nil — that's a "clear all labels" intent).
+func (v *Vault) setInternal(name string, value []byte, labels []string, setLabels bool) error {
 	if !nameRe.MatchString(name) {
 		return fmt.Errorf("secrets: invalid name %q (want %s)", name, nameRe.String())
 	}
@@ -234,8 +260,21 @@ func (v *Vault) Set(name string, value []byte) error {
 	}
 	if existing, ok := v.data[name]; ok {
 		entry.CreatedAt = existing.CreatedAt
+		if !setLabels {
+			entry.Labels = existing.Labels
+		}
 	} else {
 		entry.CreatedAt = now
+	}
+	if setLabels {
+		if len(labels) == 0 {
+			entry.Labels = nil
+		} else {
+			// Defensive copy so the caller can mutate their slice.
+			lc := make([]string, len(labels))
+			copy(lc, labels)
+			entry.Labels = lc
+		}
 	}
 	v.data[name] = entry
 	return v.save()
@@ -285,6 +324,62 @@ func (v *Vault) List() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// ListWithLabel returns the names of entries that are visible under
+// the given label scope (v0.3-fu-secrets #105). Visibility rules:
+//
+//   - An entry with no labels is ALWAYS visible (backwards-compat
+//     for vaults predating the labels feature).
+//   - An entry whose labels include `label` is visible.
+//   - An entry whose labels are non-empty but do NOT include `label`
+//     is hidden.
+//
+// Pass label == "" to disable filtering (equivalent to List).
+//
+// The contract is intentionally permissive: a user's existing
+// unlabeled entries stay visible after they start using personas, so
+// adopting the feature does not require backfilling labels.
+func (v *Vault) ListWithLabel(label string) []string {
+	if label == "" {
+		return v.List()
+	}
+	names := make([]string, 0, len(v.data))
+	for n, e := range v.data {
+		if len(e.Labels) == 0 || labelContains(e.Labels, label) {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// LabelsFor returns a copy of the labels attached to name. Returns
+// nil + ErrNotFound when no such entry. Exposed so callers can render
+// `secret show NAME` with its scope visible.
+func (v *Vault) LabelsFor(name string) ([]string, error) {
+	e, ok := v.data[name]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if len(e.Labels) == 0 {
+		return nil, nil
+	}
+	out := make([]string, len(e.Labels))
+	copy(out, e.Labels)
+	return out, nil
+}
+
+// labelContains is a small linear search — label lists are bounded
+// (one persona per entry in practice; arbitrary cap is OS-level
+// memory).
+func labelContains(labels []string, want string) bool {
+	for _, l := range labels {
+		if l == want {
+			return true
+		}
+	}
+	return false
 }
 
 // Has reports whether the named entry exists. Convenience for callers
