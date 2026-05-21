@@ -430,4 +430,3 @@ func TestMalformedJSONContinuesREPL(t *testing.T) {
 		t.Errorf("second.ID=%q, want %q", second.ID, "ping-after-bad")
 	}
 }
-

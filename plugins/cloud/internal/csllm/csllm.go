@@ -30,25 +30,45 @@ import (
 	proto "github.com/convergent-systems-co/aish/libs/proto/inference"
 )
 
-// DefaultBaseURL is the production LLM-gateway endpoint aish points at
-// by default. It's Convergent Systems' multi-provider routing layer,
-// which speaks an Anthropic-Messages-API-compatible shape on its
-// /llm/v1/* paths. Override with $LLM_BASE_URL (preferred) or
-// $ANTHROPIC_BASE_URL (legacy) to point at upstream Anthropic, a local
-// proxy, an httptest stub, etc.
+// DefaultBaseURL is the production CS gateway endpoint aish-inference-cloud
+// points at by default. The auth-proxy at this host validates the bearer
+// token and forwards the request, unmodified, to the workers-ai backend
+// which speaks OpenAI chat-completions at /v1/chat/completions.
 //
-// Tests inject an httptest.Server URL via NewClient(baseURL, ...).
-const DefaultBaseURL = "https://api.convergent-systems.co/llm/v1"
+// Override with $CS_BASE_URL (preferred) or $ANTHROPIC_BASE_URL (legacy)
+// to point at a local proxy, an httptest stub, etc. Tests inject an
+// httptest.Server URL via NewClient(baseURL, ...).
+const DefaultBaseURL = "https://api.convergent-systems.co/v1"
 
-// defaultModel is the model id used when InferParams.Model is empty.
-const defaultModel = "claude-opus-4-7"
+// DefaultModel is the model id used when InferParams.Model is empty.
+// Mirrors the workers-ai worker's DEFAULT_MODEL env binding
+// (terraform/cloudflare/workers-ai/src/worker.js §"env.DEFAULT_MODEL").
+const DefaultModel = "@cf/meta/llama-3.1-8b-instruct"
 
-// anthropicVersion is the API version sent on every request. Required
-// by the Messages API.
-const anthropicVersion = "2023-06-01"
+// allowedModels mirrors the worker's ALLOWED_MODELS allowlist. A
+// request that hits the gateway with an out-of-list model id is
+// rejected at the worker with HTTP 400 (mapped here to
+// proto.CodeInvalidParams). The plugin does NOT pre-validate against
+// this list — the worker is the source of truth — but the constant
+// is exported so future client-side code (e.g. an `aish models` UI)
+// can render the menu without round-tripping.
+var allowedModels = []string{
+	"@cf/meta/llama-3.1-8b-instruct",
+	"@cf/meta/llama-3.1-70b-instruct",
+	"@cf/meta/llama-3-8b-instruct",
+}
 
-// defaultMaxTokens caps the response length per Anthropic's required
-// max_tokens field. Tuned for shell-invocation length, not prose.
+// AllowedModels returns a copy of the model allowlist served by the
+// gateway. Callers must not mutate the returned slice — it is intended
+// for display only.
+func AllowedModels() []string {
+	out := make([]string, len(allowedModels))
+	copy(out, allowedModels)
+	return out
+}
+
+// defaultMaxTokens caps the response length per the OpenAI wire field.
+// Tuned for shell-invocation length, not prose.
 const defaultMaxTokens = 1024
 
 // defaultHTTPTimeout is the per-request timeout applied when the caller
@@ -59,20 +79,24 @@ const defaultHTTPTimeout = 30 * time.Second
 // id. Used to estimate per-request cost. An unknown model yields zero
 // rather than failing the request, per T2 directives.
 //
-// Source: Anthropic public pricing as of plan v0.1-3. A drift here
-// only affects estimates, never billing.
+// Cloudflare Workers AI's pricing is bundled into the platform
+// subscription rather than per-token. We pin the table at 0.0 across
+// the allowlist to keep the cost-telemetry shape intact while
+// reflecting the actual bill-per-call cost the user pays. Future
+// per-model pricing — if Cloudflare exposes it — can land here without
+// changing the telemetry plumbing.
 var modelPrice = map[string]struct {
 	inputPerMTok  float64
 	outputPerMTok float64
 }{
-	"claude-opus-4-7":           {15.0, 75.0},
-	"claude-sonnet-4-6":         {3.0, 15.0},
-	"claude-haiku-4-5-20251001": {0.80, 4.0},
+	"@cf/meta/llama-3.1-8b-instruct":  {0.0, 0.0},
+	"@cf/meta/llama-3.1-70b-instruct": {0.0, 0.0},
+	"@cf/meta/llama-3-8b-instruct":    {0.0, 0.0},
 }
 
-// Client is an Anthropic Messages API client. Construct with NewClient.
-// The apiKey field is unexported and MUST NOT be reachable via any
-// String, Error, or marshal path.
+// Client is a Convergent Systems LLM-gateway client. Construct with
+// NewClient. The apiKey field is unexported and MUST NOT be reachable
+// via any String, Error, or marshal path.
 type Client struct {
 	apiKey  string
 	baseURL string
@@ -100,53 +124,60 @@ func NewClient(apiKey, baseURL string, httpClient *http.Client) (*Client, error)
 	}, nil
 }
 
-// String is the debug representation of the client. The API key is
-// deliberately excluded — only the baseURL and a redaction marker
+// String is the debug representation of the client. The bearer token
+// is deliberately excluded — only the baseURL and a redaction marker
 // surface.
 func (c *Client) String() string {
 	if c == nil {
-		return "anthropic.Client(nil)"
+		return "csllm.Client(nil)"
 	}
-	return fmt.Sprintf("anthropic.Client(baseURL=%s, apiKey=[REDACTED])", c.baseURL)
+	return fmt.Sprintf("csllm.Client(baseURL=%s, apiKey=[REDACTED])", c.baseURL)
 }
 
-// messagesRequest is the JSON body sent to <base>/messages.
-type messagesRequest struct {
-	Model     string           `json:"model"`
-	MaxTokens int              `json:"max_tokens"`
-	Stream    bool             `json:"stream"`
-	Messages  []messageContent `json:"messages"`
+// chatCompletionsRequest is the JSON body sent to <base>/chat/completions.
+// Field shape mirrors the OpenAI chat-completions API — the workers-ai
+// worker passes recognised fields through to Workers AI verbatim and
+// drops unknown ones (per worker.js §"Pass through only the parameters
+// Workers AI is documented to accept").
+type chatCompletionsRequest struct {
+	Model     string        `json:"model"`
+	Messages  []chatMessage `json:"messages"`
+	Stream    bool          `json:"stream"`
+	MaxTokens int           `json:"max_tokens,omitempty"`
 }
 
-// messageContent is one message in the request.
-type messageContent struct {
+// chatMessage is one message in the OpenAI chat-completions request.
+// Roles are "system", "user", or "assistant" — see OpenAI docs.
+type chatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-// Infer opens a streaming POST against the Anthropic Messages API and
-// returns a channel of proto.Frame values. The channel closes after
-// the terminal Complete frame is emitted (or on error / ctx cancel).
+// Infer opens a streaming POST against the CS gateway's chat-completions
+// endpoint and returns a channel of proto.Frame values. The channel
+// closes after the terminal Complete frame is emitted (or on error /
+// ctx cancel).
 //
 // HTTP status mapping:
 //
-//	401  -> *CodedError{Code: CodeAuthFailed}
+//	400  -> *CodedError{Code: CodeInvalidParams}     (bad model id, etc.)
+//	401  -> *CodedError{Code: CodeAuthFailed}        (auth-proxy rejected)
 //	429  -> *CodedError{Code: CodeRateLimited}
 //	5xx  -> *CodedError{Code: CodeInternal}
 //	ctx  -> *CodedError{Code: CodeTimeout}
 //
-// The returned error MUST NOT contain the API-key value.
+// The returned error MUST NOT contain the bearer token.
 func (c *Client) Infer(ctx context.Context, params proto.InferParams) (<-chan proto.Frame, error) {
 	model := params.Model
 	if model == "" {
-		model = defaultModel
+		model = DefaultModel
 	}
 
-	body := messagesRequest{
+	body := chatCompletionsRequest{
 		Model:     model,
-		MaxTokens: defaultMaxTokens,
 		Stream:    true,
-		Messages: []messageContent{
+		MaxTokens: defaultMaxTokens,
+		Messages: []chatMessage{
 			{Role: "user", Content: params.Intent},
 		},
 	}
@@ -155,27 +186,25 @@ func (c *Client) Infer(ctx context.Context, params proto.InferParams) (<-chan pr
 		// Should be impossible — fixed-shape struct, primitive fields.
 		return nil, &CodedError{
 			Code:    proto.CodeInternal,
-			Message: "anthropic: failed to marshal request body",
+			Message: "csllm: failed to marshal request body",
 		}
 	}
 
-	// Path note: the default base URL ALREADY ends in /llm/v1, so we
-	// append `/messages` without re-stating /v1. When a caller overrides
-	// the base URL to plain `https://api.anthropic.com` (legacy /v1 in
-	// the path), they need to point at `https://api.anthropic.com/v1`
-	// so this concatenation lands at the right place. The plugin
-	// `--api-url` flag is the supported override surface.
-	url := c.baseURL + "/messages"
+	// Path note: the default base URL ends in /v1, so we append
+	// `/chat/completions`. When a caller overrides the base URL to
+	// something other than the production gateway (httptest stub,
+	// local proxy), the concatenation lands the request at the right
+	// place provided the override mirrors the same /v1 convention.
+	url := c.baseURL + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, &CodedError{
 			Code:    proto.CodeInternal,
-			Message: "anthropic: failed to build request",
+			Message: "csllm: failed to build request",
 		}
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
-	req.Header.Set("anthropic-version", anthropicVersion)
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Accept", "text/event-stream")
 
 	resp, err := c.http.Do(req)
@@ -184,12 +213,12 @@ func (c *Client) Infer(ctx context.Context, params proto.InferParams) (<-chan pr
 		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return nil, &CodedError{
 				Code:    proto.CodeTimeout,
-				Message: "anthropic: request cancelled or deadline exceeded",
+				Message: "csllm: request cancelled or deadline exceeded",
 			}
 		}
 		return nil, &CodedError{
 			Code:    proto.CodeInternal,
-			Message: "anthropic: transport error",
+			Message: "csllm: transport error",
 		}
 	}
 
@@ -208,29 +237,34 @@ func (c *Client) Infer(ctx context.Context, params proto.InferParams) (<-chan pr
 
 // statusToCodedError maps a non-2xx HTTP status to a CodedError with
 // the appropriate proto.Code. The HTTP body is intentionally NOT
-// surfaced — Anthropic's error bodies can contain echoes of headers
-// in some edge cases, and we never want the key to leak there.
+// surfaced — the auth-proxy can echo headers in some 5xx paths, and we
+// never want the bearer token to leak there.
 func statusToCodedError(status int) *CodedError {
 	switch {
+	case status == http.StatusBadRequest:
+		return &CodedError{
+			Code:    proto.CodeInvalidParams,
+			Message: "csllm: invalid request (400) — check model id or message shape",
+		}
 	case status == http.StatusUnauthorized:
 		return &CodedError{
 			Code:    proto.CodeAuthFailed,
-			Message: "anthropic: authentication failed (401)",
+			Message: "csllm: authentication failed (401)",
 		}
 	case status == http.StatusTooManyRequests:
 		return &CodedError{
 			Code:    proto.CodeRateLimited,
-			Message: "anthropic: rate limited (429)",
+			Message: "csllm: rate limited (429)",
 		}
 	case status >= 500 && status <= 599:
 		return &CodedError{
 			Code:    proto.CodeInternal,
-			Message: fmt.Sprintf("anthropic: upstream server error (%d)", status),
+			Message: fmt.Sprintf("csllm: upstream server error (%d)", status),
 		}
 	default:
 		return &CodedError{
 			Code:    proto.CodeInternal,
-			Message: fmt.Sprintf("anthropic: unexpected status %d", status),
+			Message: fmt.Sprintf("csllm: unexpected status %d", status),
 		}
 	}
 }
@@ -252,18 +286,33 @@ var (
 	// ErrMissingAPIKey is returned by NewClient when apiKey is empty.
 	// Its message intentionally contains no value — the empty string
 	// would not be a secret in any case, but consistency matters.
-	ErrMissingAPIKey = errors.New("anthropic: api key is required")
+	ErrMissingAPIKey = errors.New("csllm: api key is required")
 )
 
 // CodedError wraps a proto error code with a human-readable message.
 // Infer returns these when the upstream API rejects or times out the
-// request. Message MUST NOT contain the API key (per Common.md §4).
+// request. Message MUST NOT contain the bearer token (per Common.md §4).
+//
+// The `cause` field is unexported and reachable only through Unwrap —
+// it carries a typed sentinel (e.g. proto.ErrEmbedNotImplemented) so
+// callers can errors.Is against a stable identity without depending on
+// the human-readable Message string.
 type CodedError struct {
 	Code    int
 	Message string
+	cause   error
 }
 
 // Error renders the message. It MUST NOT include any redacted secret.
 func (e *CodedError) Error() string {
 	return e.Message
+}
+
+// Unwrap surfaces the typed cause (if any) so errors.Is works against
+// sentinels like proto.ErrEmbedNotImplemented.
+func (e *CodedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
 }
