@@ -90,6 +90,54 @@ CREATE TRIGGER IF NOT EXISTS events_fts_au AFTER UPDATE ON events BEGIN
 END;
 `
 
+// VecTableDDL is the v0.3-4 #112 sqlite-vec virtual-table definition,
+// applied OPTIONALLY at Open time. The `vec0` module is provided by
+// the sqlite-vec extension (https://github.com/asg017/sqlite-vec) —
+// when the extension is not loaded (e.g., the pure-Go modernc driver
+// without extension support, or a build where sqlite-vec is absent),
+// CREATE VIRTUAL TABLE fails with "no such module: vec0". Store.Open
+// treats that as a SOFT failure: semantic search degrades to "off"
+// and the FTS5 + LIKE path from #113 continues to serve. This is
+// load-bearing for AC10 (a pre-#112 history.db opens cleanly on a
+// pre-extension binary).
+//
+// The dimension (384) matches bge-small-en-v1.5, the chosen
+// fastembed-go model (see plan §Alternatives Table). The `+event_id`
+// column is a sqlite-vec auxiliary column — stored alongside the
+// embedding but not indexed for vector search — used to round-trip
+// the matching `events.id` back to the caller.
+//
+// The model_id is intentionally NOT on this table; sqlite-vec virtual
+// tables do not yet support arbitrary TEXT columns in v0.x, so the
+// model identifier is stored in a separate sidecar table
+// `events_vec_meta` keyed by event_id. That table is plain SQLite —
+// no extension required — and so its CREATE always succeeds.
+const VecTableDDL = `
+CREATE VIRTUAL TABLE IF NOT EXISTS events_vec USING vec0(
+  embedding FLOAT[384],
+  +event_id TEXT
+);
+`
+
+// VecMetaDDL is the plain-SQLite sidecar that records (event_id,
+// model_id) for every row in events_vec. Lives separately because
+// sqlite-vec's vec0 virtual table does not accept arbitrary TEXT
+// columns yet. The sidecar always exists (no extension needed); the
+// vec0 table may not (extension may be absent). Code paths consulting
+// the sidecar MUST handle a present-meta / absent-vec mismatch
+// gracefully — that combination is reachable on a binary built
+// without sqlite-vec but inheriting a sidecar from a previous run.
+const VecMetaDDL = `
+CREATE TABLE IF NOT EXISTS events_vec_meta (
+  event_id  TEXT NOT NULL PRIMARY KEY,
+  model_id  TEXT NOT NULL,
+  ts        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (event_id) REFERENCES events(id)
+);
+CREATE INDEX IF NOT EXISTS idx_events_vec_meta_model
+  ON events_vec_meta(model_id);
+`
+
 // migrationProbes is the list of ADD COLUMN statements that adapt a
 // pre-v0.3-4 history.db to the v0.3-4 schema. Each entry is a
 // (table, column, ddl-fragment) triple. store.migrate() walks the

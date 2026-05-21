@@ -1,6 +1,8 @@
 package shell
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -44,6 +46,8 @@ func (s *Shell) historyBuiltin(args []string, stdout, stderr io.Writer) int {
 		return s.historyCheckpoint(args[1:], stdout, stderr)
 	case "rollback":
 		return s.historyRollback(args[1:], stdout, stderr)
+	case "reindex":
+		return s.historyReindex(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		s.historyUsage(stdout)
 		return 0
@@ -62,6 +66,31 @@ func (s *Shell) historyUsage(w io.Writer) {
 	fmt.Fprintln(w, "  history purge --before <RFC3339-timestamp>")
 	fmt.Fprintln(w, "  history checkpoint <name>")
 	fmt.Fprintln(w, "  history rollback <name>")
+	fmt.Fprintln(w, "  history reindex")
+}
+
+// historyReindex implements `aish history reindex` — the v0.3-4 #112
+// backfill subcommand. Walks every event and (re-)embeds it under
+// the active EmbeddingProvider, skipping tainted commands and rows
+// already at the current model_id. Idempotent and resumable; safe
+// to interrupt and re-run.
+//
+// No flags in v0.3 — the subcommand is "do it" or "don't run it."
+// Future v0.4 work may add --batch-size and --concurrent (filed as
+// #203 follow-up).
+func (s *Shell) historyReindex(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, "aish: history reindex: usage: history reindex")
+		return 2
+	}
+	store := s.history.Store()
+	n, err := store.Reindex(context.Background())
+	if err != nil {
+		fmt.Fprintf(stderr, "aish: history reindex: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "reindexed %d event(s)\n", n)
+	return 0
 }
 
 func (s *Shell) historyList(args []string, stdout, stderr io.Writer) int {
@@ -107,15 +136,65 @@ func (s *Shell) historyShow(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// historySearch routes `history search [--mode={keyword,semantic,
+// hybrid}] <query>` to the matching Store method.
+//
+//   - keyword (FTS5-only) — pre-#112 behavior; #113's surface.
+//   - semantic (cosine-only) — v0.3-4 #112; requires an attached
+//     embedder + vector store. Empty vector store → "run
+//     `aish history reindex`" hint.
+//   - hybrid (default) — RRF k=60 fusion of FTS + cosine. Degrades
+//     to keyword when no embedder / vec is attached.
+//
+// Default mode is `hybrid` per AC5; a binary with no embedder
+// configured therefore lands on the FTS path with no error, which
+// matches the pre-#112 user experience.
 func (s *Shell) historySearch(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, "aish: history search: usage: history search <query>")
+	mode := "hybrid"
+	rest := make([]string, 0, len(args))
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--mode="):
+			mode = strings.TrimPrefix(a, "--mode=")
+		default:
+			rest = append(rest, a)
+		}
+	}
+	if len(rest) == 0 {
+		fmt.Fprintln(stderr, "aish: history search: usage: history search [--mode={keyword,semantic,hybrid}] <query>")
+		return 2
+	}
+	switch mode {
+	case "keyword", "semantic", "hybrid":
+		// ok
+	default:
+		fmt.Fprintf(stderr, "aish: history search: unknown mode %q (want keyword, semantic, or hybrid)\n", mode)
 		return 2
 	}
 	// Join multi-word queries so `history search rm tmp` works without
 	// requiring the user to quote.
-	query := strings.Join(args, " ")
-	events, err := s.history.Store().Search(query, 50)
+	query := strings.Join(rest, " ")
+	store := s.history.Store()
+
+	var (
+		events []*history.Event
+		err    error
+	)
+	switch mode {
+	case "keyword":
+		events, err = store.Search(query, 50)
+	case "semantic":
+		events, err = store.SemanticSearch(query, 50)
+		if errors.Is(err, history.ErrNoVectors) {
+			// Friendly hint rather than a raw error dump. The exit
+			// code is non-zero so scripts can branch on "feature
+			// not enabled yet" without parsing strings.
+			fmt.Fprintln(stderr, "aish: history search: semantic mode requires vectors — run `aish history reindex` after configuring an embedder")
+			return 1
+		}
+	case "hybrid":
+		events, err = store.HybridSearch(query, 50)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "aish: history search: %v\n", err)
 		return 1
