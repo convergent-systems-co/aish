@@ -98,14 +98,79 @@ type Shell struct {
 	// clipboard via secrets.CopyToClipboard. Tests inject a capturing
 	// stub via SetClipboardFnForTesting.
 	secretClipFn func([]byte) error
+	// loginMode is true when aish was invoked as a login shell — via
+	// `-l`, `--login`, or `argv[0][0] == '-'`. Controls RC sourcing
+	// (login.go) and `logout` semantics (builtin_logout.go). Set by
+	// NewWithOptions; default false for backward-compatible New().
+	loginMode bool
+	// versionString is the build-time version (`main.version`) passed
+	// in via Options.Version. Sourced into $AISH_VERSION in login mode
+	// (login.go applyLoginEnvDefaults). Empty when caller didn't
+	// supply it — that's harmless, the env var simply isn't set.
+	versionString string
+	// aliases is the v0.3-1 RC `[aliases]` table. Populated from
+	// /etc/aish/aishrc and ~/.aish/aishrc.toml on login. NOT applied
+	// to dispatch in this PR — the table is parsed and stored so the
+	// follow-up that adds the `alias` built-in (#87) doesn't require
+	// an RC format change. Nil until first alias landed.
+	aliases map[string]string
+	// execFn is the injection point for `exec <cmd>`'s syscall.Exec
+	// call. Production code leaves this nil and the built-in calls
+	// the real syscall.Exec. Tests inject a capturing stub so they
+	// can assert the resolved binary path + argv WITHOUT actually
+	// replacing the test process.
+	execFn func(argv0 string, argv []string, envv []string) error
 }
 
-// New returns a Shell with cwd initialised to the current process working
-// directory and an env seeded from os.Environ. If os.Getwd fails (rare —
-// the calling directory was removed under the process), cwd falls back to
-// "/" rather than leaving the Shell in an unrecoverable state; the
-// caller still gets a usable REPL and the first `cd` will fix it.
+// Options configures a Shell at construction time. Zero value means
+// "the historical New() behavior" — non-login, no version string.
+//
+// Options is part of the v0.3-1 login-shell work: every existing
+// caller of New() keeps its semantics; the new login-shell path
+// uses NewWithOptions explicitly.
+type Options struct {
+	// Login marks this shell as a login shell. When true,
+	// NewWithOptions sources /etc/aish/aishrc and
+	// ~/.aish/aishrc.toml before opening the cache / history /
+	// telemetry seams, applies $AISH_VERSION, and gives $PATH a
+	// POSIX default if unset.
+	Login bool
+	// Version is the build-time version string (main.version)
+	// to surface as $AISH_VERSION inside login sessions. Ignored
+	// when Login is false.
+	Version string
+	// Stderr is where RC parse-failure warnings are written.
+	// nil means os.Stderr (production default). Tests inject a
+	// bytes.Buffer to assert the warning text.
+	Stderr io.Writer
+}
+
+// New returns a Shell configured as a non-login interactive session.
+// Equivalent to NewWithOptions(Options{}). Kept as the canonical
+// constructor for backward compatibility with every existing caller
+// (cmd/aish, tests, integration harness). The login-shell path is
+// reached only via NewWithOptions.
 func New() *Shell {
+	return NewWithOptions(Options{})
+}
+
+// NewWithOptions is the v0.3-1 login-aware constructor. When
+// opts.Login is true, the constructor sources /etc/aish/aishrc and
+// $HOME/.aish/aishrc.toml *before* opening the cache / history /
+// telemetry seams (so RC-set env vars like ANTHROPIC_API_KEY reach
+// the plugin spawn), then applies the POSIX login defaults
+// ($AISH_VERSION, $PATH).
+//
+// Non-login behavior matches the historical New(): no RC sourcing,
+// no login env defaults. Existing call sites should keep calling
+// New(); only cmd/aish's flag-parsing layer reaches for
+// NewWithOptions today.
+//
+// cwd / env seeding mirrors New(): os.Getwd with `/` fallback,
+// env.FromSlice(os.Environ()). Theme registry + cache + history +
+// telemetry + community + persona openers fire in the same order
+// as New().
+func NewWithOptions(opts Options) *Shell {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "/"
@@ -131,9 +196,25 @@ func New() *Shell {
 	}
 
 	s := &Shell{
-		cwd:    cwd,
-		env:    e,
-		themes: reg,
+		cwd:           cwd,
+		env:           e,
+		themes:        reg,
+		loginMode:     opts.Login,
+		versionString: opts.Version,
+	}
+
+	// v0.3-1 login-shell wiring: source RC files BEFORE opening the
+	// cache / history / telemetry seams so that any env vars the
+	// RC sets (notably $ANTHROPIC_API_KEY / $CS_API_KEY) reach the
+	// plugin-spawn path inside openCache. Non-login sessions skip
+	// this block entirely.
+	if opts.Login {
+		stderr := opts.Stderr
+		if stderr == nil {
+			stderr = os.Stderr
+		}
+		s.loadRCFiles(stderr)
+		s.applyLoginEnvDefaults()
 	}
 
 	// Open the L1 intent cache at ~/.aish/cache.db and (when a bearer
@@ -428,8 +509,19 @@ func (s *Shell) runStream(stdin io.Reader, stdout, stderr io.Writer) error {
 		trimmed := strings.TrimRight(line, "\r\n")
 		if trimmed != "" {
 			if dispatchErr := s.dispatch(trimmed, stdin, stdout, stderr); dispatchErr != nil {
-				// dispatch only returns an error for unrecoverable I/O on the
-				// caller's streams. Surface it so the caller can decide.
+				// v0.3-1 sentinels: `logout` and (Windows) `exec`
+				// propagate a typed error to unwind the REPL cleanly.
+				// Surface them up so main() can exit with the right
+				// status; the REPL itself returns nil so callers see
+				// "shell terminated normally."
+				if _, ok := IsLogout(dispatchErr); ok {
+					return dispatchErr
+				}
+				if _, ok := IsExecReplaced(dispatchErr); ok {
+					return dispatchErr
+				}
+				// Anything else is an unrecoverable I/O error on the
+				// caller's streams.
 				return dispatchErr
 			}
 		}
@@ -502,6 +594,9 @@ func (s *Shell) runTTY(stdin io.Reader, stdout, stderr io.Writer) error {
 		}
 		history.Append(trimmed)
 		if dispatchErr := s.dispatch(trimmed, stdin, stdout, stderr); dispatchErr != nil {
+			// v0.3-1 sentinels mirror runStream: surface them so
+			// main() inspects the exit code, but the REPL itself
+			// terminates normally.
 			return dispatchErr
 		}
 	}
@@ -533,7 +628,8 @@ func (s *Shell) newCompleter() term.Completer {
 func (s *Shell) ResolveTier(firstToken string) term.Tier {
 	switch firstToken {
 	case "cd", "export", "theme", "cache", "community", "plugin", "stats", "undo", "restore",
-		"run", "explain", "migrate", "persona", "secret", "identity":
+		"run", "explain", "migrate", "persona", "secret", "identity",
+		"logout", "exec":
 		return term.TierBuiltin
 	}
 	if isKnownBinary(firstToken, s.env) {
@@ -740,6 +836,38 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		rest := strings.TrimSpace(strings.TrimPrefix(line, "identity"))
 		args := strings.Fields(rest)
 		s.SetLastExit(s.identityBuiltin(args, stdin, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `logout [n]` — v0.3-1 task #87 subset. In login mode,
+	// terminates the REPL cleanly (sentinel propagates up to runStream
+	// / runTTY, which return nil). In non-login mode, prints an error
+	// and returns 1 (matches bash). The sentinel is the ONLY case
+	// where dispatch returns non-nil for a built-in.
+	if line == "logout" || strings.HasPrefix(line, "logout ") || strings.HasPrefix(line, "logout\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "logout"))
+		args := strings.Fields(rest)
+		if err := s.logoutBuiltin(args, stderr); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// Built-in: `exec <cmd>` — v0.3-1 task #87 subset. On POSIX,
+	// syscall.Exec replaces the current process and never returns
+	// on success. Bare `exec` is a no-op. Resolution failure is
+	// fatal (exit 127) — bash semantics for login shells.
+	if line == "exec" || strings.HasPrefix(line, "exec ") || strings.HasPrefix(line, "exec\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "exec"))
+		args, parseErr := parseExecLine(rest)
+		if parseErr != nil {
+			fmt.Fprintf(stderr, "aish: exec: %v\n", parseErr)
+			s.SetLastExit(1)
+			return nil
+		}
+		if err := s.execBuiltin(args, stdout, stderr); err != nil {
+			return err
+		}
 		return nil
 	}
 
