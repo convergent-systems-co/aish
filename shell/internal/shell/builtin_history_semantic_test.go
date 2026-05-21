@@ -108,8 +108,13 @@ func TestBuiltinHistorySearch_ModeFlag_Invalid(t *testing.T) {
 }
 
 // TestBuiltinHistoryReindex_Invokes (T5 AC, AC6): `aish history
-// reindex` runs and reports the count of events processed. Exit
-// code 0 on success.
+// reindex` runs and produces output consistent with the dispatch
+// path — either "reindexed N event(s)" on success or a specific
+// "no embedder" error on the local-without-model build. Critically,
+// the output MUST NOT match the "unknown subcommand" template that
+// historyBuiltin's default case emits — that template would pass a
+// naive "any output counts" check even when the subcommand
+// dispatch is broken.
 func TestBuiltinHistoryReindex_Invokes(t *testing.T) {
 	_, cwd := chHome(t)
 	a := filepath.Join(cwd, "x.txt")
@@ -125,19 +130,33 @@ func TestBuiltinHistoryReindex_Invokes(t *testing.T) {
 		"rm "+a,
 		"history reindex",
 	)
-	// Either the command runs and reports a count, OR it reports
-	// "no embedder configured" because the local v0.3 build has no
-	// model. Both are acceptable; the seam under test is "the
-	// reindex subcommand exists and dispatches" — the no-embedder
-	// case is also a valid AC.
 	combined := out.String() + errBuf.String()
 	if combined == "" {
 		t.Errorf("history reindex produced no output (subcommand missing?)")
 	}
+	// Anti-coverage-theater: if dispatch fell to the "unknown
+	// subcommand" arm, the combined output would contain that
+	// template. Reject that explicitly so this test fails when the
+	// subcommand wiring regresses.
+	if strings.Contains(combined, "unknown subcommand") {
+		t.Errorf("history reindex routed to unknown-subcommand fallback: %q", combined)
+	}
+	// One of the two legitimate dispatch outputs MUST be present.
+	// On a v0.3 binary without an embedder the store returns
+	// "no embedder" / "no vector store" from Reindex; on a build
+	// with the model cache seeded the command reports "reindexed".
+	legitDispatch := strings.Contains(combined, "reindexed") ||
+		strings.Contains(combined, "no embedder") ||
+		strings.Contains(combined, "no vector store")
+	if !legitDispatch {
+		t.Errorf("history reindex output did not match any expected dispatch shape: %q", combined)
+	}
 }
 
 // TestBuiltinHistoryReindex_UnknownArg checks usage gating — extra
-// args produce a usage error.
+// args produce a SPECIFIC usage-error string (not the unknown-
+// subcommand fallback). The literal "usage:" substring is the
+// signal; "unknown subcommand" is the regression marker.
 func TestBuiltinHistoryReindex_UnknownArg(t *testing.T) {
 	chHome(t)
 	s := New()
@@ -146,7 +165,10 @@ func TestBuiltinHistoryReindex_UnknownArg(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	driveLines(t, s, &out, &errBuf, "history reindex extra arg")
 	combined := out.String() + errBuf.String()
-	if combined == "" {
-		t.Errorf("expected usage error for extra args, got nothing")
+	if !strings.Contains(combined, "usage:") {
+		t.Errorf("expected reindex usage-error, got %q", combined)
+	}
+	if strings.Contains(combined, "unknown subcommand") {
+		t.Errorf("extra-args case fell through to unknown-subcommand fallback: %q", combined)
 	}
 }
