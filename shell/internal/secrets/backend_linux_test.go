@@ -121,9 +121,9 @@ func TestLinuxBackend_NameValidation(t *testing.T) {
 	// the regex before any D-Bus call.
 	be := &linuxBackend{prefix: "aish:test", service: "aish:test"}
 	bad := []string{
-		"",            // empty
-		"lowercase",   // not upper
-		"WITH SPACE",  // contains space
+		"",                              // empty
+		"lowercase",                     // not upper
+		"WITH SPACE",                    // contains space
 		"X" + string(make([]byte, 200)), // too long
 	}
 	for _, n := range bad {
