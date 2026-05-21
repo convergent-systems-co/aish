@@ -266,6 +266,7 @@ func (s *Shell) personaSet(args []string, stdout, stderr io.Writer) int {
 	}
 	s.activePersona = name
 	fmt.Fprintf(stdout, "persona: active = %s\n", name)
+	s.recordPersonaUse(name)
 	return 0
 }
 

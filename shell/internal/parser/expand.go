@@ -192,9 +192,14 @@ func ExpandPipeline(p Pipeline, ctx ExpandContext) (Pipeline, error) {
 		// `sleep 30 &` still dispatches to the background path after
 		// brace/glob expansion runs on the args.
 		Background: p.Background,
+		// v0.3-fu-secrets #99: Tainted MUST survive expansion too —
+		// the shell sets it after Parse and before this call, and a
+		// tainted pipeline that gets brace-expanded into more
+		// commands stays tainted by construction.
+		Tainted: p.Tainted,
 	}
 	for _, c := range p.Commands {
-		nc := Command{Name: c.Name}
+		nc := Command{Name: c.Name, Tainted: c.Tainted}
 		for _, a := range c.Args {
 			braceExpanded := expandBrace(a)
 			for _, b := range braceExpanded {

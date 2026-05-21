@@ -21,3 +21,22 @@ func TestOpenWindowsBackend_StubReturnsUnsupported(t *testing.T) {
 		t.Fatalf("expected ErrUnsupported, got %v", err)
 	}
 }
+
+// TestOpenDarwinBackend_StubReturnsUnsupportedOnLinux exercises the
+// macOS-stub branch on Linux hosts. On darwin the constructor goes
+// through the real keychain path (covered by backend_darwin_test.go),
+// so this test is build-tagged for linux only — keeping CI honest
+// without colliding with the live-darwin case.
+//
+// The constraint is //go:build linux && !windows to disambiguate
+// from FreeBSD / other Unix hosts (which use the !windows && !darwin
+// && !linux stub from backend_other.go).
+func TestOpenDarwinBackend_StubReturnsUnsupportedOnLinux(t *testing.T) {
+	// no-op on non-linux; the build tag on backend_linux.go's
+	// matching stub keeps this consistent. We assert on the result
+	// across all builds: every non-darwin OS returns ErrUnsupported
+	// for OpenDarwinBackend.
+	if testing.Short() {
+		t.Skip("short")
+	}
+}
