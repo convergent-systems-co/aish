@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -107,15 +108,65 @@ func (s *Shell) historyShow(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// historySearch routes `history search [--mode={keyword,semantic,
+// hybrid}] <query>` to the matching Store method.
+//
+//   - keyword (FTS5-only) — pre-#112 behavior; #113's surface.
+//   - semantic (cosine-only) — v0.3-4 #112; requires an attached
+//     embedder + vector store. Empty vector store → "run
+//     `aish history reindex`" hint.
+//   - hybrid (default) — RRF k=60 fusion of FTS + cosine. Degrades
+//     to keyword when no embedder / vec is attached.
+//
+// Default mode is `hybrid` per AC5; a binary with no embedder
+// configured therefore lands on the FTS path with no error, which
+// matches the pre-#112 user experience.
 func (s *Shell) historySearch(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, "aish: history search: usage: history search <query>")
+	mode := "hybrid"
+	rest := make([]string, 0, len(args))
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--mode="):
+			mode = strings.TrimPrefix(a, "--mode=")
+		default:
+			rest = append(rest, a)
+		}
+	}
+	if len(rest) == 0 {
+		fmt.Fprintln(stderr, "aish: history search: usage: history search [--mode={keyword,semantic,hybrid}] <query>")
+		return 2
+	}
+	switch mode {
+	case "keyword", "semantic", "hybrid":
+		// ok
+	default:
+		fmt.Fprintf(stderr, "aish: history search: unknown mode %q (want keyword, semantic, or hybrid)\n", mode)
 		return 2
 	}
 	// Join multi-word queries so `history search rm tmp` works without
 	// requiring the user to quote.
-	query := strings.Join(args, " ")
-	events, err := s.history.Store().Search(query, 50)
+	query := strings.Join(rest, " ")
+	store := s.history.Store()
+
+	var (
+		events []*history.Event
+		err    error
+	)
+	switch mode {
+	case "keyword":
+		events, err = store.Search(query, 50)
+	case "semantic":
+		events, err = store.SemanticSearch(query, 50)
+		if errors.Is(err, history.ErrNoVectors) {
+			// Friendly hint rather than a raw error dump. The exit
+			// code is non-zero so scripts can branch on "feature
+			// not enabled yet" without parsing strings.
+			fmt.Fprintln(stderr, "aish: history search: semantic mode requires vectors — run `aish history reindex` after configuring an embedder")
+			return 1
+		}
+	case "hybrid":
+		events, err = store.HybridSearch(query, 50)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "aish: history search: %v\n", err)
 		return 1

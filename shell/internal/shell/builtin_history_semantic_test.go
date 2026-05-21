@@ -1,11 +1,5 @@
-//go:build phase_b
-
 // T4 + T5 tests — `aish history search --mode={keyword,semantic,
 // hybrid}` flag wiring and the new `aish history reindex` subcommand.
-//
-// Build-gated by `phase_b`; the seed commit ships these inert. Phase
-// B's coder wave adds the mode flag and reindex routing in
-// builtin_history.go.
 //
 // Acceptance criteria covered (from .artifacts/plans/112.md T4 + T5):
 //   - TestBuiltinHistorySearch_ModeFlag — three mode values route to

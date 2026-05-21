@@ -1,11 +1,4 @@
-//go:build phase_b
-
 // T4 tests — semantic + hybrid search surface on Store.
-//
-// Build-gated by `phase_b`; the seed commit ships these inert. Phase
-// B's coder wave lands SemanticSearch and HybridSearch as Store
-// methods and wires the `--mode={keyword,semantic,hybrid}` flag in
-// builtin_history.go.
 //
 // Acceptance criteria covered (from .artifacts/plans/112.md T4 + AC3,
 // AC5, AC10):
@@ -29,25 +22,69 @@ import (
 	"time"
 )
 
+// fixedVecEmbedder is the search-fixture stand-in for the real
+// embedder. It returns a constant unit vector [1,0,0,0] for every
+// input — so the embedder's output for the "scrub the staging
+// area" query equals the pre-seeded SEM event's vector exactly, and
+// cosine-similarity puts SEM at rank 1 deterministically.
+//
+// The recordingEmbedder from embed_writer_test.go returns input-
+// length-derived vectors which DO NOT match [1,0,0,0] in general;
+// using it here would make the fixture's cosine-winner
+// undetermined (and indeed, the LEX seed [0,0,1,0] would win for
+// a 22-char query because the query's third dim is largest).
+type fixedVecEmbedder struct {
+	dim     int
+	modelID string
+}
+
+func (f *fixedVecEmbedder) Embed(_ context.Context, inputs []string) ([][]float32, error) {
+	out := make([][]float32, len(inputs))
+	for i := range inputs {
+		v := make([]float32, f.dim)
+		if f.dim > 0 {
+			v[0] = 1.0
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+func (f *fixedVecEmbedder) ModelID() string { return f.modelID }
+func (f *fixedVecEmbedder) Dim() int        { return f.dim }
+
 // fixturePair seeds two events in the store: one whose command is
 // LEXICALLY matched by the query (so FTS5 finds it) and one whose
 // command is SEMANTICALLY matched (so the vector path finds it).
 //
-// The stubEmbedder used here returns vectors based on input length
-// alone, which is too crude for real cosine semantics. To make
-// "semantic match" deterministic for the test, the stub vector store
-// is pre-seeded with hand-tuned vectors so the cosine winner is
-// known. The real semantic ranking is exercised by T1's fastembed
-// tests; T4 only verifies the SURFACE — that SemanticSearch and
-// HybridSearch consult the vector store and apply RRF correctly.
+// The fixedVecEmbedder used here returns the constant vector
+// [1,0,0,0] for every input — making the cosine winner
+// deterministic regardless of the query string. To make
+// "semantic match" still meaningful for the test, the stub vector
+// store is pre-seeded with hand-tuned vectors so the SEM event's
+// row matches the embedder's [1,0,0,0] output exactly and the LEX
+// event's row points orthogonally elsewhere.
+//
+// The real semantic ranking is exercised by T1's fastembed tests
+// (which depend on the real bge-small-en-v1.5 weights); T4 here
+// verifies the SURFACE — that SemanticSearch and HybridSearch
+// consult the vector store and apply RRF correctly.
 func fixturePair(t *testing.T) (s *Store, lexID, semID string, queryVec []float32) {
 	t.Helper()
 	s = openTestStore(t)
 
-	em := &recordingEmbedder{dim: 4, modelID: "fixture-em"}
+	em := &fixedVecEmbedder{dim: 4, modelID: "fixture-em"}
 	s.WithEmbedder(em)
 
-	vs := newStubVectorStore()
+	// Use the REAL chromem-go vector store for the fixture — the
+	// seed-level stubVectorStore.Query returns rows in random
+	// map-iteration order with Score=1.0, which would make any
+	// ranking assertion non-deterministic. Per Common.md §11 "no
+	// mocks at the integration boundary," the search-surface tests
+	// exercise the real cosine path.
+	vs, err := NewVectorStore(s.db, 4)
+	if err != nil {
+		t.Fatalf("NewVectorStore: %v", err)
+	}
 	s.WithVectorStore(vs)
 
 	// Lex match: command contains "delete-tmp-build" — FTS5 will hit.
