@@ -453,3 +453,10 @@ func localFree(p unsafe.Pointer) {
 	}
 	_, _, _ = procLocalFree.Call(uintptr(p))
 }
+
+// OpenDarwinBackend on Windows returns ErrUnsupported. The macOS
+// backend's real impl is in backend_darwin.go (build:darwin); this
+// stub lets dispatch code reference the symbol on Windows builds.
+func OpenDarwinBackend(prefix string, entropy []byte) (Backend, error) {
+	return nil, ErrUnsupported
+}
