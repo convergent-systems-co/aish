@@ -13,12 +13,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/convergent-systems-co/aish/shell/internal/cache"
 	"github.com/convergent-systems-co/aish/shell/internal/cache/community"
 	"github.com/convergent-systems-co/aish/shell/internal/env"
 	"github.com/convergent-systems-co/aish/shell/internal/history"
+	"github.com/convergent-systems-co/aish/shell/internal/jobs"
 	"github.com/convergent-systems-co/aish/shell/internal/parser"
 	"github.com/convergent-systems-co/aish/shell/internal/persona"
 	"github.com/convergent-systems-co/aish/shell/internal/secrets"
@@ -125,6 +127,23 @@ type Shell struct {
 	// can assert the resolved binary path + argv WITHOUT actually
 	// replacing the test process.
 	execFn func(argv0 string, argv []string, envv []string) error
+	// jobTable is the v0.3-1 follow-up #83/#84 background-job
+	// registry. Always non-nil after New() — the table is just a
+	// map+mutex with zero external dependencies, so it can never
+	// fail to initialise.
+	jobTable *jobs.JobTable
+	// reaper is the long-lived SIGCHLD goroutine that drains child
+	// status changes into jobTable. nil on Windows (no SIGCHLD);
+	// non-nil on Unix. Torn down in Close().
+	reaper *jobs.Reaper
+	// shellPgrp is the shell process's own process group ID, captured
+	// once at construction. `fg` uses it to hand the TTY back to the
+	// shell after a foreground job exits.
+	shellPgrp int
+	// restoreShellSignals tears down the ignore-SIGINT/SIGTSTP/etc
+	// installation done at startup. Called from Close so a non-
+	// interactive aish invocation doesn't leave global state altered.
+	restoreShellSignals func()
 }
 
 // Options configures a Shell at construction time. Zero value means
@@ -252,6 +271,19 @@ func NewWithOptions(opts Options) *Shell {
 	// inference path falls back to no system-prompt injection.
 	s.openPersona(e)
 
+	// v0.3-1 follow-up #83/#84: job-control wiring. The JobTable
+	// itself is infallible (a map and a mutex). The reaper goroutine
+	// installs the SIGCHLD handler; on Windows it's a no-op. The
+	// ignore-SIGINT/SIGTSTP/etc dance happens here too so the REPL
+	// goroutine ignores those signals (children inherit the default
+	// handlers on exec; see jobs/signals_unix.go).
+	s.jobTable = jobs.NewJobTable()
+	s.reaper = jobs.StartReaper(s.jobTable)
+	if pgid, err := jobs.ShellPgrp(); err == nil {
+		s.shellPgrp = pgid
+	}
+	s.restoreShellSignals = jobs.IgnoreShellSignals()
+
 	return s
 }
 
@@ -295,6 +327,27 @@ func (s *Shell) Close() error {
 		s.community = nil
 	}
 	s.interceptors = nil
+	// v0.3-1 follow-up #83/#84: best-effort kill of any surviving
+	// background jobs, then stop the SIGCHLD reaper. Job-control
+	// invariants don't outlive the Shell — sleeping background
+	// jobs in a "logged out" shell would orphan to PID 1 with no
+	// way to talk to them, so we tear them down here.
+	if s.jobTable != nil {
+		for _, j := range s.jobTable.Snapshot() {
+			if j.Status == jobs.StatusDone {
+				continue
+			}
+			_ = jobs.SendSignal(j.Pgid, syscall.SIGTERM)
+		}
+	}
+	if s.reaper != nil {
+		s.reaper.Stop()
+		s.reaper = nil
+	}
+	if s.restoreShellSignals != nil {
+		s.restoreShellSignals()
+		s.restoreShellSignals = nil
+	}
 	// Wipe any cached passphrase before the Shell falls out of scope.
 	// secretLock is idempotent; safe even when secretPass is already nil.
 	s.secretLock()
@@ -507,6 +560,10 @@ func (s *Shell) Run(stdin io.Reader, stdout, stderr io.Writer) error {
 // touching it requires a separate plan.
 func (s *Shell) runStream(stdin io.Reader, stdout, stderr io.Writer) error {
 	for {
+		// v0.3-1 follow-up #83: emit any pending "Done"/"Stopped"
+		// notices to stderr BEFORE the prompt so users see them
+		// at the natural moment in the conversation.
+		s.drainJobNotices(stderr)
 		// Render the prompt before each read so an interactive user sees it.
 		// Errors writing the prompt are non-fatal — a piped stdin/stdout
 		// session may discard the prompt entirely.
@@ -579,6 +636,9 @@ func (s *Shell) runTTY(stdin io.Reader, stdout, stderr io.Writer) error {
 		RawTerm:   rt,
 	})
 	for {
+		// v0.3-1 follow-up #83: drain Done/Stopped notices ahead of
+		// the line-editor's prompt render. Same contract as runStream.
+		s.drainJobNotices(stderr)
 		line, err := editor.ReadLine(context.Background())
 		if errors.Is(err, io.EOF) {
 			return nil
@@ -644,7 +704,8 @@ func (s *Shell) ResolveTier(firstToken string) term.Tier {
 		"run", "explain", "migrate", "persona", "secret", "identity",
 		"logout", "exec", "history",
 		"install", "service", "process", "env", "network",
-		"alias", "source", "set", "unset":
+		"alias", "source", "set", "unset",
+		"jobs", "fg", "bg":
 		return term.TierBuiltin
 	}
 	if isKnownBinary(firstToken, s.env) {
@@ -956,6 +1017,32 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		return nil
 	}
 
+	// Built-in: `jobs` — v0.3-1 follow-up #83. Lists the JobTable.
+	if line == "jobs" || strings.HasPrefix(line, "jobs ") || strings.HasPrefix(line, "jobs\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "jobs"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.jobsBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `fg [%n]` — v0.3-1 follow-up #83. Foregrounds a
+	// background or stopped job and waits for it.
+	if line == "fg" || strings.HasPrefix(line, "fg ") || strings.HasPrefix(line, "fg\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "fg"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.fgBuiltin(args, stdin, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `bg [%n]` — v0.3-1 follow-up #83. Continues a
+	// stopped job in the background.
+	if line == "bg" || strings.HasPrefix(line, "bg ") || strings.HasPrefix(line, "bg\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "bg"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.bgBuiltin(args, stdout, stderr))
+		return nil
+	}
+
 	// Built-in: `exec <cmd>` — v0.3-1 task #87 subset. On POSIX,
 	// syscall.Exec replaces the current process and never returns
 	// on success. Bare `exec` is a no-op. Resolution failure is
@@ -1071,6 +1158,26 @@ func (s *Shell) runExternal(cmdline string, stdin io.Reader, stdout, stderr io.W
 		return nil
 	}
 	pipeline = expanded
+	// v0.3-1 follow-up #83: a pipeline parsed with a trailing `&`
+	// becomes a background job. Interceptors STILL fire (history /
+	// telemetry want to know the job started), but exec is async:
+	// the call returns immediately with exit 0 and the prompt
+	// appears before the job finishes.
+	if pipeline.Background {
+		for _, ic := range s.interceptors {
+			if err := ic.Before(&pipeline, cmdline); err != nil {
+				fmt.Fprintf(stderr, "aish: interceptor: %v\n", err)
+			}
+		}
+		exitCode := s.runBackground(pipeline, cmdline, stdout, stderr)
+		// After fires immediately — the job started; its exit code
+		// isn't known yet but the "command was issued" event is.
+		for i := len(s.interceptors) - 1; i >= 0; i-- {
+			s.interceptors[i].After(&pipeline, cmdline, exitCode, 0)
+		}
+		s.SetLastExit(exitCode)
+		return nil
+	}
 	for _, ic := range s.interceptors {
 		if err := ic.Before(&pipeline, cmdline); err != nil {
 			fmt.Fprintf(stderr, "aish: interceptor: %v\n", err)

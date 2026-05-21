@@ -72,6 +72,11 @@ func Run(
 		cmds[i] = osexec.CommandContext(ctx, c.Name, c.Args...)
 		cmds[i].Env = env
 		cmds[i].Stderr = sharedStderr
+		// v0.3-1 follow-up #84: every child starts in its own process
+		// group (Setpgid: true, Pgid: 0). Pipeline stages after the
+		// first are patched to join the first stage's pgid AFTER the
+		// first stage's pid is known — see the post-Start loop below.
+		applyPgroup(cmds[i], 0)
 	}
 
 	// First stage reads from caller-provided stdin.
@@ -101,8 +106,16 @@ func Run(
 	// Start every command. If any fails to start (e.g., missing binary),
 	// kill the ones that already started and report the setup error so the
 	// caller sees a clean failure, not a hung pipeline.
+	//
+	// v0.3-1 follow-up #84: after stage 0 starts, we rewrite later
+	// stages' SysProcAttr.Pgid so they join the first stage's pgrp.
+	// This is set BEFORE cmd.Start fires the fork+exec, so the child
+	// is born into the right pgrp atomically.
 	started := 0
 	for i, cmd := range cmds {
+		if i > 0 && cmds[0].Process != nil {
+			applyPgroup(cmd, cmds[0].Process.Pid)
+		}
 		if startErr := cmd.Start(); startErr != nil {
 			// Close all pipe fds so already-started children unblock and exit.
 			for _, f := range pipeCloses {
