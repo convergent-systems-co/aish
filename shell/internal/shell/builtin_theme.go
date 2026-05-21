@@ -166,21 +166,77 @@ func (s *Shell) themeSyncCmd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// themePreviewCmd renders a self-contained, non-activating preview of
+// a brand. The output (#79) includes the brand name as a header, all
+// roles as swatches, the glyph table, the configured segments, and a
+// sample prompt line. A leading `--plain` flag suppresses ANSI escapes
+// so the preview can be captured into a snapshot test or diffed.
+//
+// Argument forms:
+//
+//	theme preview <name>
+//	theme preview --plain <name>
+//
+// The preview MUST NOT mutate `s.themes.Active()` — that's the contract
+// difference vs `theme set` (TestThemePreview_DoesNotActivate).
 func (s *Shell) themePreviewCmd(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
+	plain := false
+	rest := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "--plain" {
+			plain = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	if len(rest) == 0 {
 		fmt.Fprintln(stderr, "aish: theme preview: missing <name>")
 		return 1
 	}
-	name := args[0]
+	name := rest[0]
 	t, ok := s.themes.Lookup(name)
 	if !ok {
 		fmt.Fprintf(stderr, "aish: theme preview: no such theme %q (try `theme list`)\n", name)
 		return 1
 	}
+
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "── theme preview: %s ──\n", t.Name())
+	buf.WriteString(t.Inspect())
+
 	cwd := "~/projects/aish"
 	promptChar := t.Glyph("prompt_char", ">")
-	fmt.Fprintf(stdout, "%s %s echo hello\n", t.ColorPrompt(cwd), promptChar)
-	fmt.Fprintln(stdout, "hello")
-	fmt.Fprintf(stdout, "%s %s\n", t.ColorPrompt(cwd), promptChar)
+	fmt.Fprintf(&buf, "\nSample prompt:\n  %s %s echo hello\n", t.ColorPrompt(cwd), promptChar)
+	buf.WriteString("  hello\n")
+
+	out := buf.String()
+	if plain {
+		out = stripThemeANSI(out)
+	}
+	fmt.Fprint(stdout, out)
 	return 0
+}
+
+// stripThemeANSI removes CSI sequences from s. Used by `theme preview
+// --plain` so the output is capture-friendly and diff-stable. The
+// theme renderer only emits 24-bit foreground escapes today; a minimal
+// CSI scanner is sufficient.
+func stripThemeANSI(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
+				j++
+			}
+			if j < len(s) {
+				j++
+			}
+			i = j - 1
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
