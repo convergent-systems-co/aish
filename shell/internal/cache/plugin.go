@@ -86,6 +86,16 @@ type PluginConfig struct {
 // plugin configured" and surface a user-friendly message rather than
 // propagating the raw exec error.
 //
+// Resolution order for the binary:
+//
+//  1. PluginConfig.BinaryPath (explicit caller override) — used as-is.
+//  2. The v0.3-2 plugin registry: the shell wires in a registry
+//     selector via shell/internal/shell/openCache, then passes the
+//     resolved absolute path here. When the registry yielded a hit
+//     the caller passes BinaryPath directly; this branch sees only the
+//     "registry empty" case.
+//  3. DefaultPluginBinary on $PATH — the pre-v0.3-2 fallback path.
+//
 // On success, a background reader goroutine begins consuming the
 // child's stdout. The child is expected to remain running until Close
 // is called or it exits on its own (e.g. crash); a child exit while

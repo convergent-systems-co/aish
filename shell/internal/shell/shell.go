@@ -310,21 +310,43 @@ func (a *cacheStatsAdapter) StatsSnapshot() (int64, int64, error) {
 }
 
 // tryStartPlugin spawns the inference plugin when a bearer key is set
-// and the binary resolves on PATH (or via $AISH_INFERENCE_PLUGIN).
-// Returns nil on any startup failure; the cache then runs in lookup-
-// only mode.
+// and the binary resolves on PATH (or via $AISH_INFERENCE_PLUGIN, or
+// via the v0.3-2 plugin registry under ~/.aish/plugins/). Returns nil
+// on any startup failure; the cache then runs in lookup-only mode.
+//
+// Resolution order for the binary:
+//  1. $AISH_INFERENCE_PLUGIN — explicit per-session override.
+//  2. The v0.3-2 plugin registry: first inference-kind plugin found.
+//  3. $PATH lookup for DefaultPluginBinary — pre-v0.3-2 fallback.
 //
 // The plugin defaults to api.convergent-systems.co/llm/v1 (set on the
 // plugin side via DefaultBaseURL). $ANTHROPIC_BASE_URL overrides.
 func tryStartPlugin(e *env.Env) *cache.PluginClient {
 	// Avoid spawning a child that will exit 2 immediately because the
-	// API key isn't set. The plugin reads $ANTHROPIC_API_KEY.
-	if k, _ := e.Get("ANTHROPIC_API_KEY"); k == "" {
+	// API key isn't set. The plugin reads $ANTHROPIC_API_KEY (legacy)
+	// or $CS_API_KEY (current).
+	keyAvailable := false
+	if k, _ := e.Get("ANTHROPIC_API_KEY"); k != "" {
+		keyAvailable = true
+	}
+	if k, _ := e.Get("CS_API_KEY"); k != "" {
+		keyAvailable = true
+	}
+	if !keyAvailable {
 		return nil
 	}
 	binary := ""
 	if v, ok := e.Get("AISH_INFERENCE_PLUGIN"); ok {
 		binary = v
+	}
+	// Consult the v0.3-2 plugin registry when the env-var override is
+	// unset. An empty registry yields "", which falls through to the
+	// PATH lookup inside cache.Start.
+	if binary == "" {
+		if home := homeDir(e); home != "" {
+			dotAish := filepath.Join(home, ".aish")
+			binary = selectRegistryInferencePlugin(dotAish, os.Stderr)
+		}
 	}
 	pc, err := cache.Start(cache.PluginConfig{
 		BinaryPath: binary,
@@ -488,7 +510,7 @@ func (s *Shell) newCompleter() term.Completer {
 // depend on shell's dispatch internals.
 func (s *Shell) ResolveTier(firstToken string) term.Tier {
 	switch firstToken {
-	case "cd", "export", "theme", "cache", "community", "stats", "undo", "restore",
+	case "cd", "export", "theme", "cache", "community", "plugin", "stats", "undo", "restore",
 		"run", "explain", "migrate", "persona":
 		return term.TierBuiltin
 	}
@@ -606,6 +628,15 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		rest := strings.TrimSpace(strings.TrimPrefix(line, "community"))
 		args := strings.Fields(rest)
 		s.SetLastExit(s.communityBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `plugin list | install <path> | remove <name> |
+	// verify <name> | status`. Per v0.3-2 acceptance (#89–#94).
+	if line == "plugin" || strings.HasPrefix(line, "plugin ") || strings.HasPrefix(line, "plugin\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "plugin"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.pluginBuiltin(args, stdout, stderr))
 		return nil
 	}
 
