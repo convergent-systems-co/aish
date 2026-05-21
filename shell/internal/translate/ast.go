@@ -22,9 +22,11 @@ package translate
 type Dialect string
 
 const (
-	DialectBash Dialect = "bash"
-	DialectZsh  Dialect = "zsh"
-	DialectFish Dialect = "fish"
+	DialectBash       Dialect = "bash"
+	DialectZsh        Dialect = "zsh"
+	DialectFish       Dialect = "fish"
+	DialectPowerShell Dialect = "powershell"
+	DialectCmd        Dialect = "cmd"
 )
 
 // Script is a parsed source file. Dialect is preserved so downstream

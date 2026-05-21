@@ -17,10 +17,16 @@ type ReaderFunc func(src string) (*Script, error)
 
 // Readers is the set of dialect readers passed into Read. Allows
 // the translate package to stay decoupled from the reader package.
+//
+// v1.0-3 adds PowerShell + Cmd. Each ReaderFunc is optional — the
+// shell wires every one that ships in the build; tests inject the
+// subset they exercise.
 type Readers struct {
-	Bash ReaderFunc
-	Zsh  ReaderFunc
-	Fish ReaderFunc
+	Bash       ReaderFunc
+	Zsh        ReaderFunc
+	Fish       ReaderFunc
+	PowerShell ReaderFunc
+	Cmd        ReaderFunc
 }
 
 // Read parses src according to the requested dialect. When dialect
@@ -42,6 +48,16 @@ func Read(dialect Dialect, src string, readers Readers) (*Script, error) {
 			return nil, fmt.Errorf("translate: no fish reader registered")
 		}
 		return readers.Fish(src)
+	case DialectPowerShell:
+		if readers.PowerShell == nil {
+			return nil, fmt.Errorf("translate: no powershell reader registered")
+		}
+		return readers.PowerShell(src)
+	case DialectCmd:
+		if readers.Cmd == nil {
+			return nil, fmt.Errorf("translate: no cmd reader registered")
+		}
+		return readers.Cmd(src)
 	default:
 		return nil, fmt.Errorf("translate: unknown dialect %q", dialect)
 	}
@@ -70,11 +86,21 @@ func Detect(path string, src string) Dialect {
 			return DialectZsh
 		case ".sh", ".bash":
 			return DialectBash
+		case ".ps1", ".psm1":
+			return DialectPowerShell
+		case ".bat", ".cmd":
+			return DialectCmd
 		}
 	}
 	// 3. Content heuristic.
 	if looksLikeFish(src) {
 		return DialectFish
+	}
+	if looksLikePowerShell(src) {
+		return DialectPowerShell
+	}
+	if looksLikeCmd(src) {
+		return DialectCmd
 	}
 	return DialectBash
 }
@@ -89,6 +115,10 @@ func dialectFromShebang(src string) (Dialect, bool) {
 	}
 	first := src[:nl]
 	switch {
+	case strings.Contains(first, "pwsh"), strings.Contains(first, "powershell"):
+		// PowerShell Core (`pwsh`) is the documented cross-platform
+		// binary; Windows PowerShell `powershell.exe` matches too.
+		return DialectPowerShell, true
 	case strings.Contains(first, "fish"):
 		return DialectFish, true
 	case strings.Contains(first, "zsh"):
@@ -97,6 +127,56 @@ func dialectFromShebang(src string) (Dialect, bool) {
 		return DialectBash, true
 	}
 	return "", false
+}
+
+// looksLikePowerShell fingerprints PowerShell on common cmdlet
+// prefixes, `$variable = …` assignment style, and the block-comment
+// `<# … #>` marker. Multiple fingerprints required before declaring
+// PS, to avoid misfiring on a bash script with a `$VAR = value`
+// substring inside a string.
+func looksLikePowerShell(src string) bool {
+	score := 0
+	lower := strings.ToLower(src)
+	if strings.Contains(lower, "write-host") {
+		score += 2
+	}
+	if strings.Contains(lower, "write-output") {
+		score += 2
+	}
+	if strings.Contains(lower, "get-service") || strings.Contains(lower, "get-process") {
+		score += 2
+	}
+	if strings.Contains(src, "<#") || strings.Contains(src, "#>") {
+		score += 2
+	}
+	if strings.Contains(src, "param(") {
+		score++
+	}
+	return score >= 2
+}
+
+// looksLikeCmd fingerprints cmd/bat on `REM` / `::` comments, the
+// `%VAR%` expansion form, and `@echo off` (the canonical opener).
+func looksLikeCmd(src string) bool {
+	score := 0
+	for _, line := range strings.Split(src, "\n") {
+		t := strings.ToLower(strings.TrimSpace(line))
+		switch {
+		case strings.HasPrefix(t, "@echo "):
+			score += 2
+		case strings.HasPrefix(t, "rem "):
+			score++
+		case strings.HasPrefix(t, "::"):
+			score++
+		case strings.HasPrefix(t, "set ") && strings.Contains(t, "="):
+			score++
+		case strings.Contains(t, "%errorlevel%"):
+			score += 2
+		case strings.HasPrefix(t, "goto "):
+			score++
+		}
+	}
+	return score >= 2
 }
 
 func looksLikeFish(src string) bool {
