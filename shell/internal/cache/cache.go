@@ -42,6 +42,10 @@ type Cache struct {
 	plugin              *PluginClient
 	community           CommunityLookup
 	similarityThreshold float64
+	// systemPromptSource returns the system prompt to inject into
+	// Infer calls — v0.3-5 persona seam. nil means "no injection,"
+	// preserving v0.1-2 behaviour exactly.
+	systemPromptSource func() string
 }
 
 // New wires a Store and optional PluginClient together. The Store is
@@ -84,6 +88,22 @@ func (c *Cache) SimilarityThreshold() float64 {
 		return 0
 	}
 	return c.similarityThreshold
+}
+
+// WithSystemPromptSource installs a callback the cache invokes ahead
+// of every Infer call to fetch the persona-derived system prompt.
+// When the callback returns an empty string OR the source is nil,
+// the cache calls plugin.Infer with no system prompt (identical to
+// v0.1-2 behaviour). v0.3-5 persona seam — see GOALS.md §Epic v0.3-5.
+//
+// The callback is invoked per Resolve call so a `persona set` mid-
+// session takes effect on the next intent.
+func (c *Cache) WithSystemPromptSource(src func() string) *Cache {
+	if c == nil {
+		return nil
+	}
+	c.systemPromptSource = src
+	return c
 }
 
 // WithCommunityBundle attaches an L3 community bundle that Resolve
@@ -224,7 +244,19 @@ func (c *Cache) Resolve(ctx context.Context, intent, os string) (string, bool, e
 	}
 
 	// Tier 3 — Infer for genuinely novel intents.
-	invocation, confidence, err := c.plugin.Infer(ctx, intent, os)
+	//
+	// v0.3-5 persona seam: when a systemPromptSource is installed and
+	// returns a non-empty string, prefix it onto the intent so the
+	// plugin gateway sees the persona's voice/tone instructions.
+	// Workaround for the proto.InferParams extension that's deferred
+	// to v0.3-5.1; see .artifacts/plans/v0.3-5.md.
+	inferIntent := intent
+	if c.systemPromptSource != nil {
+		if sp := c.systemPromptSource(); sp != "" {
+			inferIntent = sp + "\n\n<user>\n" + intent + "\n</user>"
+		}
+	}
+	invocation, confidence, err := c.plugin.Infer(ctx, inferIntent, os)
 	if err != nil {
 		return "", false, fmt.Errorf("cache: Resolve: infer: %w", err)
 	}
