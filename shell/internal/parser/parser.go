@@ -30,6 +30,12 @@ type Pipeline struct {
 	// Commands is left-to-right; Commands[0] is the producer, Commands[len-1]
 	// is the consumer whose exit code becomes the pipeline's exit code.
 	Commands []Command
+	// Background is set when the input line ended with an unquoted `&`.
+	// The shell runtime spawns the pipeline as a background job and
+	// returns to the prompt without waiting (v0.3-1 follow-up #83/#84).
+	// Mid-line `&` is rejected as a syntax error in this PR — the POSIX
+	// statement-separator form is future work.
+	Background bool
 }
 
 // Parse converts a single line of input into a Pipeline.
@@ -44,6 +50,21 @@ func Parse(input string) (Pipeline, error) {
 	}
 	if len(tokens) == 0 {
 		return Pipeline{}, nil
+	}
+
+	// v0.3-1 follow-up: peel off a single trailing `&` (background
+	// marker) before splitting on pipes. Mid-line `&` is rejected;
+	// only the absolute-last token may be the background marker.
+	background := false
+	for i, tok := range tokens {
+		if tok.kind != tokAmp {
+			continue
+		}
+		if i != len(tokens)-1 {
+			return Pipeline{}, fmt.Errorf("syntax error: '&' must be the last token (mid-line `&` not supported)")
+		}
+		background = true
+		tokens = tokens[:i]
 	}
 
 	// Split the token stream on the pipe separator to form pipeline stages.
@@ -68,6 +89,10 @@ func Parse(input string) (Pipeline, error) {
 		if sawAnyStage {
 			return Pipeline{}, fmt.Errorf("syntax error: empty pipeline stage")
 		}
+		if background {
+			// Bare `&` with nothing in front of it.
+			return Pipeline{}, fmt.Errorf("syntax error: '&' with no command")
+		}
 		// No tokens at all after filtering — treated as empty input.
 		return Pipeline{}, nil
 	}
@@ -80,7 +105,7 @@ func Parse(input string) (Pipeline, error) {
 			Args: stage[1:],
 		})
 	}
-	return Pipeline{Commands: commands}, nil
+	return Pipeline{Commands: commands, Background: background}, nil
 }
 
 // tokKind distinguishes a literal token from the pipe separator. The
@@ -91,6 +116,10 @@ type tokKind int
 const (
 	tokWord tokKind = iota
 	tokPipe
+	// tokAmp is an unquoted `&` — the background-job marker. Only
+	// legal as the absolute-last token in a line; mid-line `&`
+	// (POSIX statement separator) is rejected in this PR.
+	tokAmp
 )
 
 type token struct {
@@ -155,6 +184,9 @@ func tokenize(input string) ([]token, error) {
 		case r == '|':
 			flush()
 			tokens = append(tokens, token{kind: tokPipe})
+		case r == '&':
+			flush()
+			tokens = append(tokens, token{kind: tokAmp})
 		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
 			flush()
 		default:

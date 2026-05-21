@@ -174,6 +174,78 @@ func TestParseEmptyPipelineStage(t *testing.T) {
 	}
 }
 
+// TestParseBackground exercises the v0.3-1 follow-up: a trailing
+// unquoted `&` marks the pipeline as a background job. Mid-line `&`
+// is a syntax error (POSIX statement-separator form is future work).
+// Quoted `&` stays a literal word.
+func TestParseBackground(t *testing.T) {
+	t.Run("trailing & marks background", func(t *testing.T) {
+		p, err := Parse("sleep 30 &")
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if !p.Background {
+			t.Errorf("Background = false, want true")
+		}
+		if len(p.Commands) != 1 || p.Commands[0].Name != "sleep" {
+			t.Fatalf("commands = %+v, want [sleep 30]", p.Commands)
+		}
+		if !equalSlices(p.Commands[0].Args, []string{"30"}) {
+			t.Errorf("Args = %v, want [30] (no trailing &)", p.Commands[0].Args)
+		}
+	})
+
+	t.Run("trailing & with pipeline", func(t *testing.T) {
+		p, err := Parse("yes | head -n5 &")
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if !p.Background {
+			t.Errorf("Background = false, want true")
+		}
+		if len(p.Commands) != 2 {
+			t.Fatalf("got %d commands, want 2", len(p.Commands))
+		}
+	})
+
+	t.Run("foreground has Background false", func(t *testing.T) {
+		p, err := Parse("sleep 30")
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if p.Background {
+			t.Errorf("Background = true, want false")
+		}
+	})
+
+	t.Run("mid-line & rejected", func(t *testing.T) {
+		_, err := Parse("sleep 30 & echo done")
+		if err == nil {
+			t.Errorf("Parse: expected error for mid-line `&`")
+		}
+	})
+
+	t.Run("bare & rejected", func(t *testing.T) {
+		_, err := Parse("&")
+		if err == nil {
+			t.Errorf("Parse: expected error for bare `&`")
+		}
+	})
+
+	t.Run("quoted & stays a word", func(t *testing.T) {
+		p, err := Parse(`echo 'a & b'`)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if p.Background {
+			t.Errorf("Background = true, want false (quoted &)")
+		}
+		if len(p.Commands) != 1 || p.Commands[0].Args[0] != "a & b" {
+			t.Errorf("commands = %+v, want [echo 'a & b']", p.Commands)
+		}
+	})
+}
+
 func equalSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

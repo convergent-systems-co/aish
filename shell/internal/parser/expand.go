@@ -185,7 +185,14 @@ func findMatchingParen(runes []rune, startParen int) int {
 // Brace expansion runs first because it produces multiple tokens from
 // one input; glob then runs on each resulting token.
 func ExpandPipeline(p Pipeline, ctx ExpandContext) (Pipeline, error) {
-	out := Pipeline{Commands: make([]Command, 0, len(p.Commands))}
+	out := Pipeline{
+		Commands: make([]Command, 0, len(p.Commands)),
+		// Preserve metadata fields the parser set on the input.
+		// v0.3-1 follow-up #83: Background MUST survive expansion so
+		// `sleep 30 &` still dispatches to the background path after
+		// brace/glob expansion runs on the args.
+		Background: p.Background,
+	}
 	for _, c := range p.Commands {
 		nc := Command{Name: c.Name}
 		for _, a := range c.Args {
