@@ -39,6 +39,30 @@ build-all: ## Cross-compile aish for darwin/linux/windows × amd64/arm64
 		GOOS=$$os GOARCH=$$arch $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $$out $(CMD) || exit 1; \
 	done
 
+# ---- v1.0-1 Windows-only cross-compile (additive over build-all) ----
+#
+# These targets force `-buildvcs=false` so cross-compiles work from a
+# git-worktree (where the .git pointer breaks Go's VCS stamping).
+# Host builds via `build`/`build-all` keep the default behavior.
+WIN_GOFLAGS := -buildvcs=false
+
+.PHONY: build-windows
+build-windows: build-windows-amd64 build-windows-arm64 ## Cross-compile aish for windows/{amd64,arm64}
+
+.PHONY: build-windows-amd64
+build-windows-amd64: ## Cross-compile aish for windows/amd64
+	@mkdir -p $(DIST)
+	@out=$(DIST)/$(BINARY)-windows-amd64.exe; \
+		echo "→ shell/$$out"; \
+		GOOS=windows GOARCH=amd64 $(GO) build $(GOFLAGS) $(WIN_GOFLAGS) -ldflags "$(LDFLAGS)" -o $$out $(CMD)
+
+.PHONY: build-windows-arm64
+build-windows-arm64: ## Cross-compile aish for windows/arm64
+	@mkdir -p $(DIST)
+	@out=$(DIST)/$(BINARY)-windows-arm64.exe; \
+		echo "→ shell/$$out"; \
+		GOOS=windows GOARCH=arm64 $(GO) build $(GOFLAGS) $(WIN_GOFLAGS) -ldflags "$(LDFLAGS)" -o $$out $(CMD)
+
 .PHONY: install
 install: ## Install aish into $$GOBIN (or GOPATH/bin)
 	$(GO) install $(GOFLAGS) -ldflags "$(LDFLAGS)" $(CMD)

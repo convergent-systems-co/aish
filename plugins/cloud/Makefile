@@ -49,6 +49,30 @@ build-all: ## Cross-compile both binaries for all supported platforms
 		GOOS=$$os GOARCH=$$arch $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $$out $(CMD_ADMIN) || exit 1; \
 	done
 
+# ---- v1.0-1 Windows-only cross-compile (additive over build-all) ----
+.PHONY: build-windows
+build-windows: build-windows-amd64 build-windows-arm64 ## Cross-compile cloud binaries for windows/{amd64,arm64}
+
+.PHONY: build-windows-amd64
+build-windows-amd64: ## Cross-compile both cloud binaries for windows/amd64
+	@mkdir -p $(DIST)
+	@out=$(DIST)/$(BINARY)-windows-amd64.exe; \
+		echo "→ plugins/cloud/$$out"; \
+		GOOS=windows GOARCH=amd64 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $$out $(CMD)
+	@out=$(DIST)/$(BINARY_ADMIN)-windows-amd64.exe; \
+		echo "→ plugins/cloud/$$out"; \
+		GOOS=windows GOARCH=amd64 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $$out $(CMD_ADMIN)
+
+.PHONY: build-windows-arm64
+build-windows-arm64: ## Cross-compile both cloud binaries for windows/arm64
+	@mkdir -p $(DIST)
+	@out=$(DIST)/$(BINARY)-windows-arm64.exe; \
+		echo "→ plugins/cloud/$$out"; \
+		GOOS=windows GOARCH=arm64 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $$out $(CMD)
+	@out=$(DIST)/$(BINARY_ADMIN)-windows-arm64.exe; \
+		echo "→ plugins/cloud/$$out"; \
+		GOOS=windows GOARCH=arm64 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $$out $(CMD_ADMIN)
+
 .PHONY: install
 install: ## Install both binaries into $$GOBIN
 	$(GO) install $(GOFLAGS) -ldflags "$(LDFLAGS)" $(CMD)
