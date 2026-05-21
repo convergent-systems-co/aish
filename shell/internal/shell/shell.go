@@ -20,6 +20,7 @@ import (
 	"github.com/convergent-systems-co/aish/shell/internal/env"
 	"github.com/convergent-systems-co/aish/shell/internal/history"
 	"github.com/convergent-systems-co/aish/shell/internal/parser"
+	"github.com/convergent-systems-co/aish/shell/internal/persona"
 	"github.com/convergent-systems-co/aish/shell/internal/telemetry"
 	"github.com/convergent-systems-co/aish/shell/internal/term"
 	"github.com/convergent-systems-co/aish/shell/internal/theme"
@@ -64,6 +65,15 @@ type Shell struct {
 	// info` then reports "not loaded". The cache's L3 wire-up
 	// (Cache.WithCommunityBundle) is set whenever this is non-nil.
 	community *community.Bundle
+	// personas is the v0.3-5 persona registry — bundled + user
+	// overrides. Always non-nil after New() — the bundled set
+	// guarantees a usable "default" persona even with no user files.
+	personas *persona.Loader
+	// activePersona is the name of the persona currently shaping
+	// inference dispatch. Empty means "default"; the Persona()
+	// accessor handles the fallback. Written by `persona set` and
+	// restored from ~/.aish/config.toml on New().
+	activePersona string
 	// interceptors is the registered set of PreCommand/PostCommand
 	// observers. History registers as one entry; telemetry (v0.1-5)
 	// registers a second. Order is insertion order for Before;
@@ -128,6 +138,14 @@ func New() *Shell {
 	// nil and `aish community info` prints "not loaded" — the
 	// shell keeps running with just the v0.1-2 L1 cache.
 	s.openCommunity(os.Stderr)
+
+	// Open the v0.3-5 persona registry (bundled set + any user
+	// overrides under ~/.aish/personas/) and restore the persisted
+	// active persona from ~/.aish/config.toml. On total failure
+	// s.personas is nil and the `persona` built-in reports
+	// "registry not available" — the shell keeps running, the
+	// inference path falls back to no system-prompt injection.
+	s.openPersona(e)
 
 	return s
 }
@@ -195,6 +213,16 @@ func (s *Shell) openCache(e *env.Env) {
 	s.cacheStore = store
 	s.cachePlugin = tryStartPlugin(e)
 	s.cache = cache.New(store, s.cachePlugin)
+	// v0.3-5 persona seam: cache consults this on every Infer to
+	// inject the active persona's safety-floor + voice prompt. The
+	// closure reads s.activePersona LIVE so `persona set` mid-session
+	// takes effect on the next intent.
+	s.cache.WithSystemPromptSource(func() string {
+		if s.personas == nil {
+			return ""
+		}
+		return s.personaSystemPromptForInfer()
+	})
 }
 
 // openHistory opens ~/.aish/history.db (creating the directory if
@@ -461,7 +489,7 @@ func (s *Shell) newCompleter() term.Completer {
 func (s *Shell) ResolveTier(firstToken string) term.Tier {
 	switch firstToken {
 	case "cd", "export", "theme", "cache", "community", "stats", "undo", "restore",
-		"run", "explain", "migrate":
+		"run", "explain", "migrate", "persona":
 		return term.TierBuiltin
 	}
 	if isKnownBinary(firstToken, s.env) {
@@ -634,6 +662,15 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		return nil
 	}
 
+	// Built-in: `persona list | show <name> | set <name> | use <name>
+	// | active`. Per v0.3-5 acceptance (#114–#129).
+	if line == "persona" || strings.HasPrefix(line, "persona ") || strings.HasPrefix(line, "persona\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "persona"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.personaBuiltin(args, stdout, stderr))
+		return nil
+	}
+
 	// Dispatch tier 1 — known-binary passthrough. If the first token
 	// resolves on PATH (or via the shell's env override), treat the line
 	// as a literal command. This preserves POSIX behavior for everything
@@ -648,6 +685,13 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 	// cache write-back. The raw line (NOT $VAR-expanded) is the intent;
 	// the plugin compiles it to an invocation, which we then run through
 	// the normal external path.
+	//
+	// v0.3-5 persona seam: the cache key is the bare user intent
+	// (persona-agnostic — `delete log files` resolves the same way
+	// regardless of who the shell is being for). The persona's system
+	// prompt is injected by cache.Cache.WithSystemPromptSource ahead
+	// of any Infer call; see openCache for the wiring and
+	// .artifacts/plans/v0.3-5.md for the proto-extension deferral.
 	if s.cache != nil {
 		invocation, _, err := s.cache.Resolve(context.Background(), line, runtime.GOOS)
 		switch {
