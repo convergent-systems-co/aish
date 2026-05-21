@@ -3,7 +3,7 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
-	"math"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,33 +14,34 @@ import (
 
 // --- helpers ------------------------------------------------------------
 
-// writeSSE writes one Anthropic SSE block to w and flushes. Mirrors the
-// helper in plugins/cloud/internal/anthropic/anthropic_test.go so the
-// integration suite produces wire-identical payloads.
-func writeSSE(t *testing.T, w http.ResponseWriter, event, data string) {
+// writeOpenAISSE writes one OpenAI-shaped SSE chunk to w and flushes.
+// Mirrors the helper in plugins/cloud/internal/csllm/csllm_test.go so
+// the integration suite produces wire-identical payloads to the unit
+// suite (and, in turn, the real Cloudflare Workers AI gateway).
+func writeOpenAISSE(t *testing.T, w http.ResponseWriter, data string) {
 	t.Helper()
-	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data); err != nil {
-		t.Fatalf("writeSSE: %v", err)
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+		t.Fatalf("writeOpenAISSE: %v", err)
 	}
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// streamingAnthropicHandler returns an http.HandlerFunc that emits a
-// canonical Anthropic message stream: message_start, three
-// content_block_delta events (tokens "hello ", "world", "!"),
-// message_delta (usage), message_stop.
-func streamingAnthropicHandler(t *testing.T) http.HandlerFunc {
+// streamingOpenAIHandler returns an http.HandlerFunc that emits a
+// canonical OpenAI chat-completions stream: three delta chunks
+// ("hello ", "world", "!"), one finish-reason chunk, and the [DONE]
+// terminator.
+func streamingOpenAIHandler(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		writeSSE(t, w, "message_start", `{"type":"message_start","message":{"id":"msg_test","model":"claude-opus-4-7","usage":{"input_tokens":3,"output_tokens":0}}}`)
-		writeSSE(t, w, "content_block_delta", `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello "}}`)
-		writeSSE(t, w, "content_block_delta", `{"type":"content_block_delta","delta":{"type":"text_delta","text":"world"}}`)
-		writeSSE(t, w, "content_block_delta", `{"type":"content_block_delta","delta":{"type":"text_delta","text":"!"}}`)
-		writeSSE(t, w, "message_delta", `{"type":"message_delta","usage":{"input_tokens":3,"output_tokens":7}}`)
-		writeSSE(t, w, "message_stop", `{"type":"message_stop"}`)
+		writeOpenAISSE(t, w, `{"id":"chatcmpl-test","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}`)
+		writeOpenAISSE(t, w, `{"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"hello "}}]}`)
+		writeOpenAISSE(t, w, `{"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"world"}}]}`)
+		writeOpenAISSE(t, w, `{"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"!"}}]}`)
+		writeOpenAISSE(t, w, `{"id":"chatcmpl-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
+		writeOpenAISSE(t, w, "[DONE]")
 	}
 }
 
@@ -60,10 +61,16 @@ func TestMissingAPIKeyFailsFast(t *testing.T) {
 		env:   envWithoutKey(),
 	})
 	s.assertExitNonZero()
-	s.assertStderrContains("ANTHROPIC_API_KEY")
-	// The diagnostic MUST NOT echo the env var's value. Since the
-	// var was unset for this run, the strongest assertion is the
-	// absence of a recognisable key prefix.
+	// The diagnostic must name the *new* canonical env var. We accept
+	// either form so the back-compat banner does not break this test
+	// for the v0.2 deprecation window.
+	if !strings.Contains(s.stderr, "CS_API_KEY") && !strings.Contains(s.stderr, "ANTHROPIC_API_KEY") {
+		t.Fatalf("stderr does not name an API-key env var (CS_API_KEY or ANTHROPIC_API_KEY):\n%s", s.stderr)
+	}
+	// The diagnostic MUST NOT echo the env var's value. Since the var
+	// was unset for this run, the strongest assertion is the absence
+	// of a recognisable key prefix.
+	s.assertStderrDoesNotContain("cs_")
 	s.assertStderrDoesNotContain("sk-")
 }
 
@@ -103,7 +110,7 @@ func TestPingReturnsPong(t *testing.T) {
 }
 
 func TestInferStreamsTokensThenComplete(t *testing.T) {
-	srv := httptest.NewServer(streamingAnthropicHandler(t))
+	srv := httptest.NewServer(streamingOpenAIHandler(t))
 	defer srv.Close()
 
 	stdin := marshalRequest(t, proto.Request{
@@ -155,6 +162,68 @@ func TestInferStreamsTokensThenComplete(t *testing.T) {
 	}
 	if last.Result.Invocation == "" {
 		t.Errorf("Complete frame Invocation is empty; want assembled tokens")
+	}
+}
+
+func TestInferSendsBearerAuthAndPostsToChatCompletions(t *testing.T) {
+	// Capture the request the plugin makes so we can assert wire shape
+	// end-to-end: path, Authorization header, body model.
+	type captured struct {
+		path  string
+		auth  string
+		xapi  string
+		body  map[string]any
+		xforw string
+	}
+	gotCh := make(chan captured, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var m map[string]any
+		_ = json.Unmarshal(body, &m)
+		select {
+		case gotCh <- captured{
+			path: r.URL.Path,
+			auth: r.Header.Get("Authorization"),
+			xapi: r.Header.Get("x-api-key"),
+			body: m,
+		}:
+		default:
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		writeOpenAISSE(t, w, "[DONE]")
+	}))
+	defer srv.Close()
+
+	stdin := marshalRequest(t, proto.Request{
+		JSONRPC: proto.Version,
+		ID:      "wire-1",
+		Method:  proto.MethodInfer,
+		Params:  proto.InferParams{Intent: "probe"},
+	})
+
+	s := run(t, runOpts{
+		stdin: stdin,
+		env:   envWithKey(),
+		args:  []string{"--api-url", srv.URL},
+	})
+	s.assertExit(0)
+
+	got := <-gotCh
+	if !strings.HasSuffix(got.path, "/chat/completions") {
+		t.Errorf("request path = %q; want suffix /chat/completions", got.path)
+	}
+	if strings.Contains(got.path, "/messages") {
+		t.Errorf("request path = %q; must not contain legacy /messages", got.path)
+	}
+	if got.auth != "Bearer "+fakeAPIKey {
+		t.Errorf("Authorization header = %q; want %q", got.auth, "Bearer "+fakeAPIKey)
+	}
+	if got.xapi != "" {
+		t.Errorf("x-api-key header present (%q); want absent", got.xapi)
+	}
+	if msgs, ok := got.body["messages"].([]any); !ok || len(msgs) == 0 {
+		t.Errorf("request body.messages missing or empty (body=%+v)", got.body)
 	}
 }
 
@@ -237,9 +306,6 @@ func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer srv.Close()
 
-	// Use a method name the plugin does not register. (MethodEmbed
-	// previously played this role, but it's now wired in by v0.1-2-followup;
-	// see TestEmbedMethodReturnsVector below.)
 	stdin := marshalRequest(t, proto.Request{
 		JSONRPC: proto.Version,
 		ID:      "unknown-1",
@@ -269,23 +335,16 @@ func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 	}
 }
 
-// TestEmbedMethodReturnsVector exercises MethodEmbed end-to-end through
-// the plugin: stub the gateway's /embeddings endpoint, send a JSON-RPC
-// embed request via the plugin's stdin, and assert the plugin emits one
-// Embedding frame carrying the vector + cost telemetry.
-func TestEmbedMethodReturnsVector(t *testing.T) {
-	wantVector := []float64{0.1, -0.2, 0.3, 0.4, 0.5}
+// TestEmbedMethodReturnsNotImplementedError exercises MethodEmbed
+// end-to-end through the plugin: the post-#178 gateway has no
+// /embeddings endpoint, so the plugin MUST surface a typed
+// proto.CodeNotImplemented JSON-RPC error without making a request.
+// The httptest server here fails the test if it is hit at all —
+// proving the short-circuit.
+func TestEmbedMethodReturnsNotImplementedError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/embeddings") {
-			t.Errorf("unexpected path %q; want suffix /embeddings", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"data":  []map[string]any{{"embedding": wantVector, "index": 0}},
-			"model": "voyage-3",
-			"usage": map[string]any{"prompt_tokens": 4, "total_tokens": 4},
-		})
+		t.Errorf("unexpected HTTP request reached gateway stub: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
 
@@ -295,7 +354,6 @@ func TestEmbedMethodReturnsVector(t *testing.T) {
 		Method:  proto.MethodEmbed,
 		Params: proto.InferParams{
 			Intent: "list files",
-			Model:  "voyage-3",
 		},
 	})
 
@@ -311,34 +369,17 @@ func TestEmbedMethodReturnsVector(t *testing.T) {
 		t.Fatalf("want 1 response, got %d: %+v", len(resps), resps)
 	}
 	r := resps[0]
-	if r.Error != nil {
-		t.Fatalf("unexpected Error=%+v", r.Error)
+	if r.Error == nil {
+		t.Fatalf("expected Error, got Result=%+v", r.Result)
 	}
-	if r.Result == nil {
-		t.Fatalf("expected Result, got nil")
+	if r.Error.Code != proto.CodeNotImplemented {
+		t.Errorf("Error.Code=%d, want %d (CodeNotImplemented)", r.Error.Code, proto.CodeNotImplemented)
 	}
-	if r.Result.Type != proto.KindEmbedding {
-		t.Errorf("Result.Type=%q, want %q", r.Result.Type, proto.KindEmbedding)
-	}
-	if len(r.Result.Vector) != len(wantVector) {
-		t.Fatalf("Vector len=%d, want %d", len(r.Result.Vector), len(wantVector))
-	}
-	// Tolerance compare — float64 JSON values narrowed to float32 by the
-	// anthropic client introduce ~1e-7 representation noise.
-	const tol = 1e-6
-	for i, v := range wantVector {
-		if d := math.Abs(float64(r.Result.Vector[i]) - v); d > tol {
-			t.Errorf("Vector[%d]=%v, want %v (delta %v > %v)", i, r.Result.Vector[i], v, d, tol)
-		}
-	}
-	if r.Result.Cost == nil {
-		t.Fatal("Cost is nil; want populated")
-	}
-	if r.Result.Cost.Model == "" {
-		t.Errorf("Cost.Model empty; want a model id distinct from the infer model")
-	}
-	if r.ID != "embed-e2e-1" {
-		t.Errorf("response.ID=%q, want %q", r.ID, "embed-e2e-1")
+	// And the message names the failure mode without leaking the API
+	// key (defence in depth — the plugin should never send a request,
+	// but the redactor must still cover any error string).
+	if strings.Contains(r.Error.Message, fakeAPIKey) {
+		t.Errorf("Error.Message leaks API key value: %q", r.Error.Message)
 	}
 }
 

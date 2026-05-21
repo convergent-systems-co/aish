@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -10,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	proto "github.com/convergent-systems-co/aish/libs/proto/inference"
 )
 
 // stubBinary is the path to the compiled stub-plugin, populated by
@@ -264,6 +267,34 @@ func TestPluginEmbedAfterClose(t *testing.T) {
 	defer cancel()
 	if _, err := plugin.Embed(ctx, "intent"); err == nil {
 		t.Error("Embed after Close: expected error, got nil")
+	}
+}
+
+// TestPluginEmbedReturnsTypedSentinelOnNotImplemented verifies that
+// when the spawned plugin replies to MethodEmbed with a JSON-RPC error
+// whose Code is proto.CodeNotImplemented, PluginClient.Embed translates
+// that on-wire error back into the typed Go sentinel
+// proto.ErrEmbedNotImplemented (matchable via errors.Is). Without this
+// translation, cache.Cache.Resolve cannot reliably branch on the
+// "embeddings unavailable" condition (a string-match on Error.Message
+// would be brittle).
+func TestPluginEmbedReturnsTypedSentinelOnNotImplemented(t *testing.T) {
+	env := append(os.Environ(), "STUB_EMBED_NOT_IMPLEMENTED=1")
+	plugin, err := Start(PluginConfig{BinaryPath: stubBinary, Env: env, Stderr: io.Discard})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = plugin.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, embErr := plugin.Embed(ctx, "anything")
+	if embErr == nil {
+		t.Fatal("Embed: expected error, got nil")
+	}
+	if !errors.Is(embErr, proto.ErrEmbedNotImplemented) {
+		t.Errorf("Embed: err = %v; want errors.Is(err, proto.ErrEmbedNotImplemented)", embErr)
 	}
 }
 

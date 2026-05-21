@@ -3,9 +3,12 @@ package cache
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	proto "github.com/convergent-systems-co/aish/libs/proto/inference"
 )
 
 // newCacheNoPlugin opens a cache with a real Store and no plugin —
@@ -20,6 +23,15 @@ func newCacheNoPlugin(t *testing.T) *Cache {
 // plugin (compiled by TestMain in plugin_test.go).
 func newCacheWithStub(t *testing.T) *Cache {
 	t.Helper()
+	return newCacheWithStubEnv(t, nil)
+}
+
+// newCacheWithStubEnv is newCacheWithStub but threads extra env vars to
+// the spawned stub binary. Used by the embed-not-implemented test to
+// flip the stub into its CodeNotImplemented-returning mode without
+// touching the parent process env.
+func newCacheWithStubEnv(t *testing.T, extraEnv []string) *Cache {
+	t.Helper()
 	dir := t.TempDir()
 	store, err := Open(filepath.Join(dir, "cache.db"))
 	if err != nil {
@@ -27,7 +39,11 @@ func newCacheWithStub(t *testing.T) *Cache {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	plugin, err := Start(PluginConfig{BinaryPath: stubBinary})
+	cfg := PluginConfig{BinaryPath: stubBinary}
+	if len(extraEnv) > 0 {
+		cfg.Env = append(os.Environ(), extraEnv...)
+	}
+	plugin, err := Start(cfg)
 	if err != nil {
 		t.Fatalf("plugin Start: %v", err)
 	}
@@ -118,6 +134,53 @@ func TestResolveNilStoreFails(t *testing.T) {
 	c := &Cache{}
 	if _, _, err := c.Resolve(context.Background(), "intent", "darwin"); err == nil {
 		t.Error("Resolve on empty Cache: expected error, got nil")
+	}
+}
+
+// TestResolveSkipsSimilarityOnEmbedNotImplemented pins the post-#178
+// behaviour: when the plugin's Embed returns proto.ErrEmbedNotImplemented
+// (the typed "this gateway has no /embeddings endpoint" sentinel),
+// Cache.Resolve must skip the similarity branch and proceed straight to
+// Infer. The v0.1-2 exact-hash branch still works the same way; only
+// the similarity tier is suppressed.
+func TestResolveSkipsSimilarityOnEmbedNotImplemented(t *testing.T) {
+	c := newCacheWithStubEnv(t, []string{"STUB_EMBED_NOT_IMPLEMENTED=1"})
+
+	// Sanity-check: the plugin's Embed surfaces the sentinel typed.
+	embCtx, embCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer embCancel()
+	if _, err := c.plugin.Embed(embCtx, "anything"); err == nil {
+		t.Fatal("plugin.Embed: expected ErrEmbedNotImplemented, got nil error")
+	} else if !errors.Is(err, proto.ErrEmbedNotImplemented) {
+		t.Fatalf("plugin.Embed: err = %v; want errors.Is(err, proto.ErrEmbedNotImplemented)", err)
+	}
+
+	// Resolve on a fresh intent must NOT fail even though the similarity
+	// branch is unusable — it falls through to Infer (which the stub
+	// answers with "echo <intent>") and writes back without an embedding.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, fromCache, err := c.Resolve(ctx, "say hi", "darwin")
+	if err != nil {
+		t.Fatalf("Resolve: %v (similarity branch must degrade gracefully on sentinel)", err)
+	}
+	if fromCache {
+		t.Error("fromCache = true on first Resolve; want false")
+	}
+	if want := "echo say hi"; got != want {
+		t.Errorf("invocation = %q; want %q", got, want)
+	}
+
+	// Second call hits the exact-hash cache (write-back ran on the first).
+	got2, fromCache2, err := c.Resolve(ctx, "say hi", "darwin")
+	if err != nil {
+		t.Fatalf("second Resolve: %v", err)
+	}
+	if !fromCache2 {
+		t.Error("second Resolve fromCache = false; want true (write-back proved itself)")
+	}
+	if got2 != got {
+		t.Errorf("second invocation = %q; want %q (same as first)", got2, got)
 	}
 }
 

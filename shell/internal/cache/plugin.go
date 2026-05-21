@@ -362,6 +362,14 @@ func (p *PluginClient) Embed(ctx context.Context, text string) ([]float32, error
 				return nil, errors.New("cache: Embed: plugin stream closed before embedding frame")
 			}
 			if resp.Error != nil {
+				// The plugin signals "this gateway does not implement
+				// embeddings" via proto.CodeNotImplemented. Translate
+				// that on-wire code back into the typed Go sentinel so
+				// cache.Resolve can errors.Is(err, ErrEmbedNotImplemented)
+				// without parsing the error message.
+				if resp.Error.Code == proto.CodeNotImplemented {
+					return nil, fmt.Errorf("cache: Embed: %w", proto.ErrEmbedNotImplemented)
+				}
 				return nil, fmt.Errorf("cache: Embed: plugin error %d: %s", resp.Error.Code, resp.Error.Message)
 			}
 			if resp.Result == nil {

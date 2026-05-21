@@ -2,37 +2,43 @@
 // It reads JSON-RPC requests on stdin, dispatches to handlers, and
 // writes NDJSON responses on stdout.
 //
-// Wire shape is Anthropic Messages API-compatible. The default endpoint
-// is the Convergent Systems LLM gateway
-// (api.convergent-systems.co/llm/v1), which fans out to Anthropic and
-// other providers behind a single auth surface. Override with --api-url
-// or $ANTHROPIC_BASE_URL when pointing at upstream Anthropic, a local
-// proxy, or an httptest stub.
+// Wire shape is OpenAI chat-completions. The default endpoint is the
+// Convergent Systems LLM gateway (api.convergent-systems.co/v1), which
+// is Cloudflare Workers AI behind a Bearer-token auth-proxy (per
+// core-infra: workers-ai/src/worker.js, auth-proxy/src/index.js).
+// Override with --api-url, $CS_BASE_URL, or $ANTHROPIC_BASE_URL
+// (legacy, deprecated) when pointing at a local proxy or an httptest
+// stub.
 //
 // Configuration:
 //
-//	ANTHROPIC_API_KEY   required; bearer key for the LLM gateway
-//	ANTHROPIC_BASE_URL  optional; override the base URL (test stubs etc.)
+//	CS_API_KEY          required; bearer token for the CS gateway
+//	CS_BASE_URL         optional; override the base URL (test stubs etc.)
+//	ANTHROPIC_API_KEY   legacy alias for CS_API_KEY (deprecated, accepted through v0.2)
+//	ANTHROPIC_BASE_URL  legacy alias for CS_BASE_URL (deprecated, accepted through v0.2)
 //	AISH_COST_LOG       optional; path to the JSONL cost log
+//
+// When both the new and legacy env vars are set, the CS_* names win
+// and a one-line deprecation warning is printed to stderr.
 //
 // Flags:
 //
 //	--version, -v   print version + build time and exit 0
 //	--help, -h      print usage and exit 0
-//	--api-url URL   override the base URL (wins over $ANTHROPIC_BASE_URL)
+//	--api-url URL   override the base URL (wins over $CS_BASE_URL/$ANTHROPIC_BASE_URL)
 //
-// On a missing $ANTHROPIC_API_KEY the binary writes a single-line error
-// (no value, no env-dump) to stderr and exits 2. Panics are caught by a
-// top-level firewall and exit 3 after redacting the API key from any
-// stringified state.
+// On a missing API key the binary writes a single-line error (no
+// value, no env-dump) to stderr and exits 2. Panics are caught by a
+// top-level firewall and exit 3 after redacting the bearer token from
+// any stringified state.
 //
-// Typed errors from the Anthropic client (auth failed, rate limited,
-// timeout) are surfaced as JSON-RPC error responses with the right
-// proto.Code. Because rpc.Dispatcher collapses every handler error to
-// CodeInternal, the MethodInfer handler writes the typed error
-// response itself through a mutex-guarded stdout writer that the
-// dispatcher also uses — preserving line atomicity without modifying
-// the rpc package.
+// Typed errors from the csllm client (auth failed, rate limited,
+// timeout, not-implemented for embeddings) are surfaced as JSON-RPC
+// error responses with the right proto.Code. Because rpc.Dispatcher
+// collapses every handler error to CodeInternal, the MethodInfer
+// handler writes the typed error response itself through a
+// mutex-guarded stdout writer that the dispatcher also uses —
+// preserving line atomicity without modifying the rpc package.
 //
 // See libs/proto/inference for the wire-protocol types.
 package main
@@ -51,7 +57,7 @@ import (
 	"syscall"
 
 	proto "github.com/convergent-systems-co/aish/libs/proto/inference"
-	"github.com/convergent-systems-co/aish/plugins/cloud/internal/anthropic"
+	"github.com/convergent-systems-co/aish/plugins/cloud/internal/csllm"
 	"github.com/convergent-systems-co/aish/plugins/cloud/internal/reliab"
 	"github.com/convergent-systems-co/aish/plugins/cloud/internal/rpc"
 )
@@ -65,20 +71,22 @@ var (
 // usage prints the long-form help text to w. Kept identical regardless
 // of which flag triggered it so stdout is stable across --help and -h.
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "aish-inference-cloud — Anthropic Cloud inference plugin for aish")
+	fmt.Fprintln(w, "aish-inference-cloud — Convergent Systems LLM-gateway inference plugin for aish")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage: aish-inference-cloud [--api-url URL]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Reads JSON-RPC requests on stdin (NDJSON), writes responses on stdout.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Flags:")
-	fmt.Fprintln(w, "  --api-url URL        override the Anthropic base URL (wins over $ANTHROPIC_BASE_URL)")
+	fmt.Fprintln(w, "  --api-url URL        override the gateway base URL (wins over $CS_BASE_URL/$ANTHROPIC_BASE_URL)")
 	fmt.Fprintln(w, "  --version, -v        print version and exit")
 	fmt.Fprintln(w, "  --help, -h           print this help and exit")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Env vars:")
-	fmt.Fprintln(w, "  ANTHROPIC_API_KEY    required")
-	fmt.Fprintln(w, "  ANTHROPIC_BASE_URL   optional (override endpoint)")
+	fmt.Fprintln(w, "  CS_API_KEY           required; bearer token for api.convergent-systems.co/v1/*")
+	fmt.Fprintln(w, "  CS_BASE_URL          optional; override the gateway base URL")
+	fmt.Fprintln(w, "  ANTHROPIC_API_KEY    legacy alias for CS_API_KEY (deprecated, accepted through v0.2)")
+	fmt.Fprintln(w, "  ANTHROPIC_BASE_URL   legacy alias for CS_BASE_URL (deprecated, accepted through v0.2)")
 	fmt.Fprintln(w, "  AISH_COST_LOG        optional (default ~/.aish/cost-log.jsonl)")
 }
 
@@ -133,11 +141,42 @@ func writeErrorResponse(w io.Writer, id string, code int, message string) error 
 	return err
 }
 
+// resolveAPIKey returns (token, legacyOnly). The canonical env var is
+// CS_API_KEY; ANTHROPIC_API_KEY is accepted as a deprecated alias
+// through v0.2 (per plan §"Alternatives — env-var naming"). When the
+// caller relied solely on the legacy name, legacyOnly is true so main
+// can emit a one-line deprecation warning to stderr.
+func resolveAPIKey() (token string, legacyOnly bool) {
+	if v := os.Getenv("CS_API_KEY"); v != "" {
+		return v, false
+	}
+	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
+		return v, true
+	}
+	return "", false
+}
+
+// resolveBaseURL returns (baseURL, legacyOnly). Mirrors resolveAPIKey
+// for the gateway base URL. An empty string is a valid return — the
+// csllm package falls back to its DefaultBaseURL when given no
+// override.
+func resolveBaseURL() (baseURL string, legacyOnly bool) {
+	if v := os.Getenv("CS_BASE_URL"); v != "" {
+		return v, false
+	}
+	if v := os.Getenv("ANTHROPIC_BASE_URL"); v != "" {
+		return v, true
+	}
+	return "", false
+}
+
 func main() {
 	// Capture the key once so the panic firewall (deferred below) can
 	// redact it even if main() panics before we reach the redaction
-	// helpers below.
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	// helpers below. Resolution prefers the canonical CS_API_KEY and
+	// falls back to the legacy ANTHROPIC_API_KEY alias for the v0.2
+	// deprecation window.
+	apiKey, apiKeyLegacy := resolveAPIKey()
 
 	// Top-level panic firewall. A panic anywhere below — dispatcher
 	// goroutine, handler, encoder — bubbles up here. We log a redacted
@@ -165,7 +204,7 @@ func main() {
 	fs.BoolVar(&showVersion, "v", false, "print version and exit (shorthand)")
 	fs.BoolVar(&showHelp, "help", false, "print help and exit")
 	fs.BoolVar(&showHelp, "h", false, "print help and exit (shorthand)")
-	fs.StringVar(&apiURL, "api-url", "", "override the Anthropic base URL (wins over $ANTHROPIC_BASE_URL)")
+	fs.StringVar(&apiURL, "api-url", "", "override the CS gateway base URL (wins over $CS_BASE_URL/$ANTHROPIC_BASE_URL)")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
@@ -182,16 +221,29 @@ func main() {
 	// --- Config resolution -------------------------------------------
 	if apiKey == "" {
 		// Common.md §4: no key value, no env-var noise in the error.
-		fmt.Fprintln(os.Stderr, "aish-inference-cloud: ANTHROPIC_API_KEY is required")
+		// Name both the canonical and legacy alias so operators on
+		// either side of the v0.2 deprecation window see what they
+		// expect.
+		fmt.Fprintln(os.Stderr, "aish-inference-cloud: CS_API_KEY (or legacy ANTHROPIC_API_KEY) is required")
 		os.Exit(2)
+	}
+	// One-time deprecation banner when the caller is only on the
+	// legacy ANTHROPIC_* names. The warning goes to stderr (not
+	// stdout — stdout is reserved for NDJSON responses).
+	if apiKeyLegacy {
+		fmt.Fprintln(os.Stderr, "aish-inference-cloud: WARNING: ANTHROPIC_API_KEY is deprecated; rename to CS_API_KEY (legacy support ends in v0.3)")
 	}
 	baseURL := apiURL
 	if baseURL == "" {
-		baseURL = os.Getenv("ANTHROPIC_BASE_URL")
+		envBase, baseLegacy := resolveBaseURL()
+		baseURL = envBase
+		if baseLegacy && envBase != "" {
+			fmt.Fprintln(os.Stderr, "aish-inference-cloud: WARNING: ANTHROPIC_BASE_URL is deprecated; rename to CS_BASE_URL (legacy support ends in v0.3)")
+		}
 	}
 
 	// --- Construct collaborators -------------------------------------
-	client, err := anthropic.NewClient(apiKey, baseURL, nil)
+	client, err := csllm.NewClient(apiKey, baseURL, nil)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, redactKey(fmt.Sprintf("aish-inference-cloud: %v", err), apiKey))
 		os.Exit(2)
@@ -274,7 +326,7 @@ func main() {
 // empty. Plan §"Sub-tasks → T1" explicitly scopes ID-correlation to the
 // dispatcher's existing path; preserving it through the error bypass
 // would require modifying internal/rpc, which is out of scope.
-func inferHandler(client *anthropic.Client, cost *reliab.Cost, out io.Writer, apiKey string) rpc.Handler {
+func inferHandler(client *csllm.Client, cost *reliab.Cost, out io.Writer, apiKey string) rpc.Handler {
 	return func(hctx context.Context, params proto.InferParams) (<-chan proto.Frame, error) {
 		upstream, err := client.Infer(hctx, params)
 		if err != nil {
@@ -317,7 +369,7 @@ func inferHandler(client *anthropic.Client, cost *reliab.Cost, out io.Writer, ap
 // arm is CodeInternal so unrecognized error shapes do not leak through
 // as success-zero values.
 func classifyInferError(err error) (int, string) {
-	var ce *anthropic.CodedError
+	var ce *csllm.CodedError
 	if errors.As(err, &ce) {
 		return ce.Code, ce.Message
 	}
@@ -334,7 +386,7 @@ func classifyInferError(err error) (int, string) {
 // Error handling mirrors inferHandler: typed errors bypass the
 // dispatcher's CodeInternal-only error path by writing a JSON-RPC
 // error response directly to the shared (line-atomic) stdout writer.
-func embedHandler(client *anthropic.Client, cost *reliab.Cost, out io.Writer, apiKey string) rpc.Handler {
+func embedHandler(client *csllm.Client, cost *reliab.Cost, out io.Writer, apiKey string) rpc.Handler {
 	return func(hctx context.Context, params proto.InferParams) (<-chan proto.Frame, error) {
 		embedParams := proto.EmbedParams{
 			Text:  params.Intent,
@@ -353,8 +405,12 @@ func embedHandler(client *anthropic.Client, cost *reliab.Cost, out io.Writer, ap
 		}
 
 		// Record cost for the embedding bucket. The model field
-		// distinguishes embed (e.g. "voyage-3") from infer
-		// (e.g. "claude-opus-4-7") in the aggregated cost log.
+		// distinguishes embed (when implemented — see core-infra#10)
+		// from infer (e.g. "@cf/meta/llama-3.1-8b-instruct") in the
+		// aggregated cost log. Today this code path is unreachable
+		// because Embed returns the typed not-implemented sentinel
+		// before any result is produced; left in place so the cost
+		// plumbing is ready for #10.
 		if cost != nil && result.Cost != nil {
 			if recErr := cost.Record(result.Cost.Model, result.Cost.TokensIn, result.Cost.TokensOut, result.Cost.USD); recErr != nil {
 				fmt.Fprintln(os.Stderr, redactKey(fmt.Sprintf("aish-inference-cloud: cost.Record: %v", recErr), apiKey))
