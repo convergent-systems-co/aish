@@ -30,13 +30,13 @@ type TierResolver interface {
 type Role string
 
 const (
-	RoleDefault       Role = "default"
-	RoleAccent        Role = "accent"
-	RoleString        Role = "string"
-	RoleAITierLocal   Role = "ai_tier_local"
-	RoleAITierCloud   Role = "ai_tier_cloud"
-	RoleGhost         Role = "ghost_suggestion"
-	RoleSearchPrompt  Role = "search_prompt"
+	RoleDefault      Role = "default"
+	RoleAccent       Role = "accent"
+	RoleString       Role = "string"
+	RoleAITierLocal  Role = "ai_tier_local"
+	RoleAITierCloud  Role = "ai_tier_cloud"
+	RoleGhost        Role = "ghost_suggestion"
+	RoleSearchPrompt Role = "search_prompt"
 )
 
 // Span is one contiguous run of characters in the highlighted line.
