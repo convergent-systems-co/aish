@@ -25,17 +25,30 @@
 //
 // # Backends
 //
-// As of v1.0-4, the package exposes a Backend interface (backend.go)
-// that captures the operations the `aish secret` built-in needs:
-// Set, Get, Rm, List, Has, Close. Two implementations exist:
+// The package exposes a Backend interface (backend.go) that captures
+// the operations the `aish secret` built-in needs: Set, Get, Rm,
+// List, Has, Close. Four implementations exist:
 //
 //   - LocalVault (this package; default cross-platform) — the
 //     Argon2id + AES-256-GCM file vault documented above.
 //
 //   - WindowsBackend (backend_windows.go) — Credential Manager
 //     storage with DPAPI-wrapped values. Returned by
-//     OpenWindowsBackend; the `!windows` build of that constructor
+//     OpenWindowsBackend; the non-Windows build of that constructor
 //     returns ErrUnsupported.
+//
+//   - DarwinBackend (backend_darwin.go) — macOS login keychain via
+//     /usr/bin/security (no CGO, no Security.framework binding).
+//     Returned by OpenDarwinBackend; the non-darwin build returns
+//     ErrUnsupported.
+//
+//   - LinuxBackend (backend_linux.go) — freedesktop Secret Service
+//     via D-Bus (github.com/godbus/dbus/v5; no libsecret, no CGO).
+//     Returned by OpenLinuxBackend; the non-linux build returns
+//     ErrUnsupported. On Linux hosts where no Secret Service daemon
+//     is registered (typical headless / SSH installs),
+//     OpenLinuxBackend also returns ErrUnsupported so dispatch can
+//     fall through to LocalVault.
 //
 // Dispatch (the choice of which backend to use at runtime) is the
 // responsibility of the caller, not this package.
@@ -43,13 +56,12 @@
 // # Non-goals (current scope)
 //
 //   - Parser-level taint propagation (#96, #98, #99).
-//   - macOS Keychain / freedesktop Secret Service backends
-//     (post-v1.0).
 //   - Persona-bound secrets (#105); the labels field is reserved but
 //     unused.
 //   - Passphrase change / rekey.
 //   - Vault export/import.
-//   - Built-in dispatch between LocalVault and WindowsBackend; the
-//     `secret` built-in still calls OpenVault unconditionally
-//     (deferred to v1.0-5).
+//   - Built-in dispatch between LocalVault and the OS-native
+//     backends; the `secret` built-in still calls OpenVault
+//     unconditionally (deferred to TL_BUILTINS' sibling PR /
+//     v1.0-5).
 package secrets

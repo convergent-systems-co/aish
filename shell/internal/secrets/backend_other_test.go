@@ -8,10 +8,10 @@ import (
 )
 
 // TestOpenWindowsBackend_StubReturnsUnsupported exercises the
-// non-Windows sentinel path. It exists so macOS / Linux CI covers
-// the branch that returns ErrUnsupported and the rest of the shell
-// can rely on the sentinel rather than guarding every call site
-// with runtime.GOOS.
+// non-Windows sentinel path for OpenWindowsBackend. It exists so
+// macOS / Linux CI covers the branch that returns ErrUnsupported and
+// the rest of the shell can rely on the sentinel rather than
+// guarding every call site with runtime.GOOS.
 func TestOpenWindowsBackend_StubReturnsUnsupported(t *testing.T) {
 	be, err := OpenWindowsBackend("aish:", nil)
 	if be != nil {
