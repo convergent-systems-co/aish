@@ -14,10 +14,10 @@ import (
 // TestWinAdminScriptsRoundTrip is the v1.0-3 #145 smoke gate. It
 // walks every fixture under win_testdata/ through:
 //
-//   1. translate.Detect            — by path extension.
-//   2. translate.Read              — via the appropriate reader.
-//   3. translate.Explain           — deterministic baseline only.
-//   4. translate.Migrate           — rule-based aish-native emit.
+//  1. translate.Detect            — by path extension.
+//  2. translate.Read              — via the appropriate reader.
+//  3. translate.Explain           — deterministic baseline only.
+//  4. translate.Migrate           — rule-based aish-native emit.
 //
 // Each step must complete without error. Output must be non-empty
 // where the script itself is non-empty. We deliberately don't

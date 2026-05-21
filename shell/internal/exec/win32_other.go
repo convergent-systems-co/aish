@@ -43,9 +43,9 @@ type ServiceEntry struct {
 // NetworkInterface is the MVP shape of `aish network interfaces`.
 // First IPv4 only — multi-address adapters fall under v1.1.
 type NetworkInterface struct {
-	Name      string
-	MAC       string
-	IPv4      string
+	Name        string
+	MAC         string
+	IPv4        string
 	Operational bool
 }
 
