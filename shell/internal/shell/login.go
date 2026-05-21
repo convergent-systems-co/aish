@@ -1,23 +1,32 @@
-// Package-internal: login-shell capabilities for v0.3-1.
+// Package-internal: login-shell capabilities, originally added in
+// v0.3-1 (POSIX) and extended in v1.0-5 (Windows RC location).
 //
 // A login shell is the first process a user lands in when they log
-// into a system (via getty, sshd, login(8), GDM, …). POSIX shells
-// adopt three conventions to detect "I am a login shell":
+// into a system (via getty, sshd, login(8), GDM, Winlogon, …).
+// POSIX shells adopt three conventions to detect "I am a login
+// shell":
 //
 //  1. argv[0] begins with a `-` (e.g. `-bash`, `-aish`).
 //     login(8) and sshd invoke shells this way.
 //  2. The `-l` flag is present in argv.
 //  3. The `--login` flag is present in argv.
 //
+// Windows does NOT use the argv[0]-dash convention. The shell is
+// registered via the registry (see scripts/win/register-shell.ps1)
+// and the OS invokes it directly; the `-l` / `--login` flags still
+// work for explicit opt-in.
+//
 // Detection happens once in cmd/aish/main.go before the Shell is
 // constructed; the result lives on Shell.loginMode.
 //
 // When loginMode == true, NewWithOptions sources two RC files in
 // order *before* opening the cache / history / telemetry seams (so
-// RC-set env vars like ANTHROPIC_API_KEY reach the plugin spawn):
+// RC-set env vars like ANTHROPIC_API_KEY reach the plugin spawn).
 //
-//  1. /etc/aish/aishrc        — system-wide
-//  2. $HOME/.aish/aishrc.toml — per-user
+// POSIX system file:    /etc/aish/aishrc
+// POSIX per-user file:  $HOME/.aish/aishrc.toml
+// Windows system file:  %PROGRAMDATA%\aish\aishrc.toml
+// Windows per-user:     %APPDATA%\aish\aishrc.toml
 //
 // The user file overrides the system file on key collisions. A
 // missing file is silently skipped — RC failure must not deny
@@ -32,23 +41,40 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 
 	"github.com/BurntSushi/toml"
 )
 
-// systemRCPath is the canonical system-wide RC file location.
-// Linux distributions and Homebrew packagers can drop site-wide
-// defaults here without touching $HOME. Matches the placement of
-// /etc/bash.bashrc and /etc/zshrc.
-const systemRCPath = "/etc/aish/aishrc"
+// systemRCPath returns the canonical system-wide RC file location
+// for the current build's GOOS. On POSIX this is the fixed
+// `/etc/aish/aishrc` (matching v0.3-1). On Windows it is
+// `%PROGRAMDATA%\aish\aishrc.toml` (resolved at runtime to honor
+// custom %PROGRAMDATA% values; defaults to `C:\ProgramData` when
+// the env var is unset).
+//
+// Exposed as a function (not a const) because the Windows path
+// is resolved from the process environment at call time —
+// see v1.0-5 plan §1.
+func systemRCPath() string {
+	return systemRCPathForGoos(runtime.GOOS, os.Getenv("PROGRAMDATA"))
+}
 
-// userRCRelPath is appended to $HOME to locate the per-user RC.
-// Lives under ~/.aish/ so it shares a directory with cache.db /
-// history.db / config.toml.
-const userRCRelPath = ".aish/aishrc.toml"
+// userRCPath returns the per-user RC file location for the
+// current GOOS, given the resolved home directory. On POSIX
+// this is `<home>/.aish/aishrc.toml`. On Windows it is
+// `%APPDATA%\aish\aishrc.toml`, falling back to
+// `<home>\AppData\Roaming\aish\aishrc.toml` when %APPDATA% is
+// unset. Returns "" when no usable path can be resolved (caller
+// silently skips RC sourcing — v0.3-1 invariant).
+//
+// Exposed as a function so the pure-function resolver
+// (userRCPathForGoos) is the single source of truth across
+// platforms; see v1.0-5 plan §1.
+func userRCPath(home string) string {
+	return userRCPathForGoos(runtime.GOOS, home, os.Getenv("APPDATA"))
+}
 
 // defaultPOSIXPath is the bash-compatible PATH default applied when
 // loginMode == true AND $PATH is unset after RC sourcing. Mirrors
@@ -76,18 +102,27 @@ type rcShell struct {
 // user file is applied second so any conflicting key wins for the
 // user.
 func (s *Shell) loadRCFiles(stderr io.Writer) {
-	// 1. System-wide.
-	if _, err := os.Stat(systemRCPath); err == nil {
-		if rcErr := s.applyRCFile(systemRCPath, stderr); rcErr != nil {
-			fmt.Fprintf(stderr, "aish: warning: %s: %v\n", systemRCPath, rcErr)
+	// 1. System-wide. POSIX: /etc/aish/aishrc. Windows:
+	//    %PROGRAMDATA%\aish\aishrc.toml. Missing file is a
+	//    silent skip on either platform.
+	if sysRC := systemRCPath(); sysRC != "" {
+		if _, err := os.Stat(sysRC); err == nil {
+			if rcErr := s.applyRCFile(sysRC, stderr); rcErr != nil {
+				fmt.Fprintf(stderr, "aish: warning: %s: %v\n", sysRC, rcErr)
+			}
 		}
 	}
-	// 2. Per-user.
+	// 2. Per-user. POSIX: $HOME/.aish/aishrc.toml. Windows:
+	//    %APPDATA%\aish\aishrc.toml (or
+	//    $USERPROFILE\AppData\Roaming\aish\aishrc.toml when
+	//    %APPDATA% is unset). The user file is applied second
+	//    so its keys win over the system file.
 	if home := homeDir(s.env); home != "" {
-		userRC := filepath.Join(home, userRCRelPath)
-		if _, err := os.Stat(userRC); err == nil {
-			if rcErr := s.applyRCFile(userRC, stderr); rcErr != nil {
-				fmt.Fprintf(stderr, "aish: warning: %s: %v\n", userRC, rcErr)
+		if userRC := userRCPath(home); userRC != "" {
+			if _, err := os.Stat(userRC); err == nil {
+				if rcErr := s.applyRCFile(userRC, stderr); rcErr != nil {
+					fmt.Fprintf(stderr, "aish: warning: %s: %v\n", userRC, rcErr)
+				}
 			}
 		}
 	}
