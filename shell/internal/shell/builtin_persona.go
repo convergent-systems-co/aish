@@ -19,6 +19,13 @@ import (
 // built-in will print "registry not available". Inference dispatch
 // falls through to no-persona behaviour. This matches the
 // graceful-degradation posture of openCache / openHistory / openTelemetry.
+//
+// Side effect: when both the persona registry and the history engine
+// are wired, this also opens the persona-events sidecar (#125) and
+// registers a persona-aware Interceptor that records the active
+// persona against each new history event. The interceptor is appended
+// LAST so it sees the event ID after history.History.Before has
+// already appended it.
 func (s *Shell) openPersona(e *env.Env) {
 	home := homeDir(e)
 	userDir := ""
@@ -42,6 +49,23 @@ func (s *Shell) openPersona(e *env.Env) {
 			}
 			// Unknown name silently falls through to default — same
 			// posture as theme.SetActive.
+		}
+	}
+
+	// v0.3-5.1 (#125): wire the persona-events sidecar + interceptor
+	// when both registry and history are open. A re-entry of openPersona
+	// (e.g. after `persona create`) is harmless: the interceptor is
+	// idempotent on already-attributed event IDs, and re-opening the
+	// MetaStore re-reads the same on-disk file.
+	if home != "" && s.history != nil && s.personaMeta == nil {
+		dotAish := filepath.Join(home, persona.ConfigDirName)
+		if meta, mErr := persona.OpenMetaStore(dotAish); mErr == nil {
+			s.personaMeta = meta
+			s.interceptors = append(s.interceptors, &personaHistoryInterceptor{
+				meta:    meta,
+				store:   s.history.Store(),
+				persona: func() string { return s.Persona().Name },
+			})
 		}
 	}
 }
