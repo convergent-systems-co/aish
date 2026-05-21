@@ -51,7 +51,7 @@ import (
 	"syscall"
 
 	proto "github.com/convergent-systems-co/aish/libs/proto/inference"
-	"github.com/convergent-systems-co/aish/plugins/cloud/internal/anthropic"
+	"github.com/convergent-systems-co/aish/plugins/cloud/internal/csllm"
 	"github.com/convergent-systems-co/aish/plugins/cloud/internal/reliab"
 	"github.com/convergent-systems-co/aish/plugins/cloud/internal/rpc"
 )
@@ -191,7 +191,7 @@ func main() {
 	}
 
 	// --- Construct collaborators -------------------------------------
-	client, err := anthropic.NewClient(apiKey, baseURL, nil)
+	client, err := csllm.NewClient(apiKey, baseURL, nil)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, redactKey(fmt.Sprintf("aish-inference-cloud: %v", err), apiKey))
 		os.Exit(2)
@@ -274,7 +274,7 @@ func main() {
 // empty. Plan §"Sub-tasks → T1" explicitly scopes ID-correlation to the
 // dispatcher's existing path; preserving it through the error bypass
 // would require modifying internal/rpc, which is out of scope.
-func inferHandler(client *anthropic.Client, cost *reliab.Cost, out io.Writer, apiKey string) rpc.Handler {
+func inferHandler(client *csllm.Client, cost *reliab.Cost, out io.Writer, apiKey string) rpc.Handler {
 	return func(hctx context.Context, params proto.InferParams) (<-chan proto.Frame, error) {
 		upstream, err := client.Infer(hctx, params)
 		if err != nil {
@@ -317,7 +317,7 @@ func inferHandler(client *anthropic.Client, cost *reliab.Cost, out io.Writer, ap
 // arm is CodeInternal so unrecognized error shapes do not leak through
 // as success-zero values.
 func classifyInferError(err error) (int, string) {
-	var ce *anthropic.CodedError
+	var ce *csllm.CodedError
 	if errors.As(err, &ce) {
 		return ce.Code, ce.Message
 	}
@@ -334,7 +334,7 @@ func classifyInferError(err error) (int, string) {
 // Error handling mirrors inferHandler: typed errors bypass the
 // dispatcher's CodeInternal-only error path by writing a JSON-RPC
 // error response directly to the shared (line-atomic) stdout writer.
-func embedHandler(client *anthropic.Client, cost *reliab.Cost, out io.Writer, apiKey string) rpc.Handler {
+func embedHandler(client *csllm.Client, cost *reliab.Cost, out io.Writer, apiKey string) rpc.Handler {
 	return func(hctx context.Context, params proto.InferParams) (<-chan proto.Frame, error) {
 		embedParams := proto.EmbedParams{
 			Text:  params.Intent,

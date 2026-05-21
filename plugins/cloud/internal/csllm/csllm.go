@@ -1,14 +1,21 @@
-// Package anthropic is the Claude / Anthropic Messages API client used
-// by aish-inference-cloud. It speaks SSE to <base>/messages (relative
-// to the configured base URL — see DefaultBaseURL) and translates each
-// delta into a proto.Frame, terminated by a Complete frame carrying
-// the assembled invocation, confidence, and cost telemetry.
+// Package csllm is the Convergent Systems LLM-gateway client used by
+// aish-inference-cloud. It speaks OpenAI chat-completions over SSE to
+// <base>/chat/completions (relative to the configured base URL — see
+// DefaultBaseURL) and translates each delta into a proto.Frame,
+// terminated by a Complete frame carrying the assembled invocation,
+// confidence, and cost telemetry.
 //
-// The package is invoked through the rpc.Dispatcher; it does not touch
-// stdin, stdout, or the JSON-RPC envelope shape. The API key is held
-// privately and is NEVER written to logs, error messages, or any
-// captured output (per Common.md §4).
-package anthropic
+// The gateway is Cloudflare Workers AI fronted by a Bearer-token
+// auth-proxy (per core-infra: workers-ai/src/worker.js,
+// auth-proxy/src/index.js). The package is invoked through the
+// rpc.Dispatcher; it does not touch stdin, stdout, or the JSON-RPC
+// envelope shape. The bearer token is held privately and is NEVER
+// written to logs, error messages, or any captured output (per
+// Common.md §4).
+//
+// Renamed from `anthropic` in #178 — the previous package name was a
+// misnomer that masked a wire-protocol mismatch.
+package csllm
 
 import (
 	"bytes"
