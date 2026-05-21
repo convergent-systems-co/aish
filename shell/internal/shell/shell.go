@@ -20,7 +20,11 @@ import (
 	"github.com/convergent-systems-co/aish/shell/internal/env"
 	"github.com/convergent-systems-co/aish/shell/internal/history"
 	"github.com/convergent-systems-co/aish/shell/internal/parser"
+<<<<<<< HEAD
 	"github.com/convergent-systems-co/aish/shell/internal/persona"
+=======
+	"github.com/convergent-systems-co/aish/shell/internal/secrets"
+>>>>>>> 9f49a09 (feat(shell): aish secret + identity built-ins)
 	"github.com/convergent-systems-co/aish/shell/internal/telemetry"
 	"github.com/convergent-systems-co/aish/shell/internal/term"
 	"github.com/convergent-systems-co/aish/shell/internal/theme"
@@ -79,6 +83,24 @@ type Shell struct {
 	// registers a second. Order is insertion order for Before;
 	// reverse for After (see interceptor.go).
 	interceptors []Interceptor
+	// secretPass is the session-scoped passphrase cache for the v0.3-3
+	// secrets engine. nil before the first `secret` command; zeroed on
+	// `secret lock`, on Close, and on Open-vault failure. NEVER logged.
+	// We cache the passphrase rather than the derived key because each
+	// vault Open re-derives anyway; this keeps the long-lived in-memory
+	// secret surface minimal.
+	secretPass []byte
+	// secretCostShown is the one-shot flag for printing the KDF cost
+	// description on first vault initialization. Per the threat-model
+	// requirement to make Argon2id costs visible to the user.
+	secretCostShown bool
+	// secretKDFOverride is non-nil only in tests; production uses
+	// secrets.DefaultKDFParams. See SetSecretKDFParamsForTesting.
+	secretKDFOverride *secrets.KDFParams
+	// secretClipFn is the clipboard sink; nil means use the real OS
+	// clipboard via secrets.CopyToClipboard. Tests inject a capturing
+	// stub via SetClipboardFnForTesting.
+	secretClipFn func([]byte) error
 }
 
 // New returns a Shell with cwd initialised to the current process working
@@ -190,6 +212,9 @@ func (s *Shell) Close() error {
 		s.community = nil
 	}
 	s.interceptors = nil
+	// Wipe any cached passphrase before the Shell falls out of scope.
+	// secretLock is idempotent; safe even when secretPass is already nil.
+	s.secretLock()
 	return firstErr
 }
 
@@ -510,8 +535,13 @@ func (s *Shell) newCompleter() term.Completer {
 // depend on shell's dispatch internals.
 func (s *Shell) ResolveTier(firstToken string) term.Tier {
 	switch firstToken {
+<<<<<<< HEAD
 	case "cd", "export", "theme", "cache", "community", "plugin", "stats", "undo", "restore",
 		"run", "explain", "migrate", "persona":
+=======
+	case "cd", "export", "theme", "cache", "community", "stats", "undo", "restore",
+		"run", "explain", "migrate", "secret", "identity":
+>>>>>>> 9f49a09 (feat(shell): aish secret + identity built-ins)
 		return term.TierBuiltin
 	}
 	if isKnownBinary(firstToken, s.env) {
@@ -693,12 +723,31 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		return nil
 	}
 
+<<<<<<< HEAD
 	// Built-in: `persona list | show <name> | set <name> | use <name>
 	// | active`. Per v0.3-5 acceptance (#114–#129).
 	if line == "persona" || strings.HasPrefix(line, "persona ") || strings.HasPrefix(line, "persona\t") {
 		rest := strings.TrimSpace(strings.TrimPrefix(line, "persona"))
 		args := strings.Fields(rest)
 		s.SetLastExit(s.personaBuiltin(args, stdout, stderr))
+=======
+	// Built-in: `secret <set|get|list|rm|lock|help>` — v0.3-3 task #97.
+	// Stdin is the value source for `set` and the passphrase source on
+	// first call of the session. NEVER echoes a value to stdout/stderr.
+	if line == "secret" || strings.HasPrefix(line, "secret ") || strings.HasPrefix(line, "secret\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "secret"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.secretBuiltin(args, stdin, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `identity <use|list|show|create|help>` — v0.3-3 task
+	// #103. Operates on ~/.aish/identity.toml + ~/.aish/identities/.
+	if line == "identity" || strings.HasPrefix(line, "identity ") || strings.HasPrefix(line, "identity\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "identity"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.identityBuiltin(args, stdin, stdout, stderr))
+>>>>>>> 9f49a09 (feat(shell): aish secret + identity built-ins)
 		return nil
 	}
 
