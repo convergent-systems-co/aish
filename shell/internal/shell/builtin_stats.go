@@ -100,7 +100,7 @@ func synthesizeCurrentSession(rec *telemetry.Recorder) telemetry.SessionRow {
 // output is parseable by `awk` and friends. No tabs — they render
 // inconsistently across terminals.
 func renderStatsTable(w io.Writer, rows []telemetry.SessionRow) {
-	fmt.Fprintln(w, "session       cmds  cache-hits  hit-rate  infer-calls  cost-usd")
+	fmt.Fprintln(w, "session         cmds  cache-hits  hit-rate  infer-calls  cost-usd")
 	if len(rows) == 0 {
 		fmt.Fprintln(w, "(no sessions recorded yet)")
 		return
@@ -110,7 +110,7 @@ func renderStatsTable(w io.Writer, rows []telemetry.SessionRow) {
 	for _, r := range rows {
 		c := r.Counters
 		hitRate := statsHitRate(c.CacheHits, c.CacheHits+c.CacheMisses)
-		fmt.Fprintf(w, "%-12s  %4d  %10d  %8s  %11d  $%7.4f\n",
+		fmt.Fprintf(w, "%-14s  %4d  %10d  %8s  %11d  $%7.4f\n",
 			shortID(r.ID), c.Commands, c.CacheHits, hitRate, c.InferenceCalls, r.Costs.TotalUSD)
 		totalHits += c.CacheHits
 		totalQueries += c.CacheHits + c.CacheMisses
@@ -119,8 +119,8 @@ func renderStatsTable(w io.Writer, rows []telemetry.SessionRow) {
 		totalUSD += r.Costs.TotalUSD
 	}
 	fmt.Fprintln(w, "")
-	fmt.Fprintf(w, "Window: %d session(s) | total cmds: %d | cumulative hit rate: %s | total cost: $%.4f\n",
-		len(rows), totalCmds, statsHitRate(totalHits, totalQueries), totalUSD)
+	fmt.Fprintf(w, "Window: %d session(s) | total cmds: %d | infer calls: %d | cumulative hit rate: %s | total cost: $%.4f\n",
+		len(rows), totalCmds, totalInfer, statsHitRate(totalHits, totalQueries), totalUSD)
 }
 
 // statsHitRate is the renderer-side cousin of cache builtin's
@@ -133,24 +133,35 @@ func statsHitRate(hits, total int64) string {
 	return fmt.Sprintf("%.1f%%", 100*float64(hits)/float64(total))
 }
 
-// shortID truncates a session ID to its first 12 characters for the
-// table column. Preserves the " (now)" suffix on the in-flight row.
+// shortID truncates a session ID to fit the table column. For the
+// in-flight row (" (now)" suffix), we keep the suffix intact and
+// truncate the head to 4 hex chars — "abcd (now)" is more useful to
+// the user than "abcdef12 (no" because the suffix carries the
+// semantic information.
+//
+// The column width budget is 14 characters (matching the "%-14s"
+// directive in renderStatsTable). The historical-row form is the
+// first 8 hex chars (RFC 4122 v4's first group), which uniquely
+// identifies the session in any reasonable session count.
 func shortID(id string) string {
+	const colWidth = 14
 	if idx := strings.Index(id, " "); idx > 0 {
-		// e.g. "<uuid> (now)" — keep the suffix.
 		head := id[:idx]
-		tail := id[idx:]
-		if len(head) > 8 {
-			head = head[:8]
+		tail := id[idx:] // includes the leading space, e.g. " (now)"
+		budget := colWidth - len(tail)
+		if budget < 1 {
+			// Tail alone exceeds column width — shouldn't happen with
+			// the current " (now)" suffix, but defend against future
+			// suffix growth.
+			return tail[:colWidth]
 		}
-		out := head + tail
-		if len(out) > 12 {
-			out = out[:12]
+		if len(head) > budget {
+			head = head[:budget]
 		}
-		return out
+		return head + tail
 	}
-	if len(id) > 12 {
-		return id[:12]
+	if len(id) > colWidth {
+		return id[:colWidth]
 	}
 	return id
 }
