@@ -107,6 +107,42 @@ spawn-release: ## Reset Pipeline to Backlog: make spawn-release ISSUE=42
 	@test -n "$(ISSUE)" || (echo "usage: make spawn-release ISSUE=<n>" && exit 2)
 	@python3 .artifacts/spawn/board.py release $(ISSUE)
 
+# ---- v0.3-1 login-shell registration helpers ----
+#
+# install-shells prints (does NOT execute) the platform-specific
+# instructions a user runs to register the locally-built aish as
+# a login shell. We deliberately do NOT sudo or write to
+# /etc/shells from the Makefile — privileged + destructive
+# operations stay user-initiated per the project's autonomy
+# rules.
+.PHONY: install-shells
+install-shells: ## Print platform-specific instructions to register aish as a login shell
+	@uname_s=$$(uname -s 2>/dev/null || echo unknown); \
+	bin=$$(pwd)/shell/dist/aish; \
+	case "$$uname_s" in \
+	  Darwin|Linux) \
+	    echo "→ To register aish as a login shell on $$uname_s:"; \
+	    echo ""; \
+	    echo "  1. Build the binary if you haven't already:"; \
+	    echo "       make -C shell build"; \
+	    echo ""; \
+	    echo "  2. Add aish to /etc/shells (requires sudo):"; \
+	    echo "       echo $$bin | sudo tee -a /etc/shells"; \
+	    echo ""; \
+	    echo "  3. Set aish as your login shell:"; \
+	    echo "       chsh -s $$bin"; \
+	    echo ""; \
+	    echo "  4. (Optional) Drop a starter RC file in place:"; \
+	    echo "       mkdir -p \$$HOME/.aish && cp data/aish/aishrc.example \$$HOME/.aish/aishrc.toml"; \
+	    echo ""; \
+	    echo "Log out and back in to land in aish."; \
+	    ;; \
+	  *) \
+	    echo "→ install-shells: $$uname_s is not a supported login-shell host."; \
+	    echo "  aish login-shell capabilities currently target macOS and Linux."; \
+	    ;; \
+	esac
+
 .PHONY: help
 help: ## List monorepo targets
 	@awk 'BEGIN {FS = ":.*?## "; printf "Monorepo targets:\n\n"} /^[a-zA-Z_-]+:.*?## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST) | sort

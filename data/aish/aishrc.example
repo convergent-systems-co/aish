@@ -1,0 +1,47 @@
+# aishrc.example — sample login-shell RC for aish v0.3-1.
+#
+# Copy to ~/.aish/aishrc.toml to activate. The system-wide
+# counterpart lives at /etc/aish/aishrc (admin-managed); both
+# files are sourced in order, user wins on conflicts.
+#
+# The file is TOML. Missing fields are fine. Parse errors and
+# invalid umask values write a one-line warning to stderr and
+# the shell still launches — RC failure must never deny login.
+
+# ---------------------------------------------------------------
+# [env] — variables exported into the login session's env.
+#
+# Set anything you'd otherwise `export` from .bashrc. Values are
+# read literally; no expansion or command substitution yet.
+# ---------------------------------------------------------------
+[env]
+# A sane default PATH. aish ALSO supplies the POSIX default
+# /usr/local/bin:/usr/bin:/bin when PATH is unset post-RC, so
+# this line is only needed when you want a custom value.
+# PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Editor used by less, git, and other downstream tools.
+# EDITOR = "vim"
+
+# aish picks up either ANTHROPIC_API_KEY (legacy) or CS_API_KEY
+# (current). Prefer setting these via `aish secret set` and
+# leaving the RC clean of credentials.
+# CS_API_KEY = "..."   # ← DO NOT do this. Use `aish secret set`.
+
+# ---------------------------------------------------------------
+# [shell] — runtime options for the shell itself.
+# ---------------------------------------------------------------
+[shell]
+# File-creation mask. Octal string, parsed via strconv.ParseInt
+# with base 8. POSIX-only — no-op on Windows.
+# umask = "022"
+
+# ---------------------------------------------------------------
+# [aliases] — name -> expansion. PARSED but NOT YET APPLIED in
+# v0.3-1; reserved for the v0.3-1c follow-up that adds the
+# `alias` built-in. The on-disk format is fixed today so users
+# don't have to migrate later.
+# ---------------------------------------------------------------
+[aliases]
+# ll = "ls -la"
+# gs = "git status"
