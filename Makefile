@@ -59,6 +59,67 @@ clean: ## Clean every module's build artifacts and the top-level dist/
 release: ## Cross-compile every module's release bundle
 	@for m in $(MODULES); do echo "→ $$m"; $(MAKE) --no-print-directory -C $$m release || exit 1; done
 
+# ---- v1.0-1 Windows build pipeline ----
+#
+# build-windows produces the per-module Windows binaries and aggregates
+# them into the repo-root dist/ for downstream packaging (winget/MSI).
+#
+# release-windows additionally writes per-file sha256 sidecars and a
+# top-level MANIFEST.txt — the artifact set the winget manifest's
+# InstallerSha256 fields point at.
+WIN_BINARIES := \
+	aish-windows-amd64.exe \
+	aish-windows-arm64.exe \
+	aish-inference-cloud-windows-amd64.exe \
+	aish-inference-cloud-windows-arm64.exe \
+	aish-plugin-windows-amd64.exe \
+	aish-plugin-windows-arm64.exe
+
+.PHONY: build-windows
+build-windows: ## Cross-compile every module's Windows binaries into dist/
+	@echo "→ building Windows binaries (amd64, arm64) for all modules"
+	@$(MAKE) --no-print-directory -C shell build-windows
+	@$(MAKE) --no-print-directory -C plugins/cloud build-windows
+	@mkdir -p dist
+	@cp shell/dist/aish-windows-amd64.exe dist/
+	@cp shell/dist/aish-windows-arm64.exe dist/
+	@cp plugins/cloud/dist/aish-inference-cloud-windows-amd64.exe dist/
+	@cp plugins/cloud/dist/aish-inference-cloud-windows-arm64.exe dist/
+	@cp plugins/cloud/dist/aish-plugin-windows-amd64.exe dist/
+	@cp plugins/cloud/dist/aish-plugin-windows-arm64.exe dist/
+	@echo "→ aggregated Windows binaries in dist/"
+	@ls -lh dist/aish-*-windows-*.exe dist/aish-windows-*.exe 2>/dev/null | awk '{print "  "$$0}'
+
+.PHONY: release-windows
+release-windows: build-windows ## Seal Windows binaries with per-file SHA256 + MANIFEST.txt
+	@echo "→ sealing Windows release artifacts"
+	@cd dist && for f in $(WIN_BINARIES); do \
+		if [ ! -f "$$f" ]; then echo "missing: $$f" >&2; exit 1; fi; \
+		(shasum -a 256 "$$f" 2>/dev/null || sha256sum "$$f") > "$$f.sha256"; \
+	done
+	@( cd dist && \
+		echo "# aish-windows release manifest"; \
+		echo "# generated $(shell date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+		echo "# format: <sha256>  <size>  <filename>"; \
+		for f in $(WIN_BINARIES); do \
+			sum=$$(awk '{print $$1}' "$$f.sha256"); \
+			sz=$$(wc -c < "$$f" | tr -d ' '); \
+			printf "%s  %10s  %s\n" "$$sum" "$$sz" "$$f"; \
+		done \
+	) > dist/aish-windows-MANIFEST.txt
+	@echo "→ Windows release artifacts:"
+	@ls -lh dist/aish-windows-MANIFEST.txt dist/aish-*-windows-*.exe* dist/aish-windows-*.exe* 2>/dev/null | awk '{print "  "$$0}'
+
+.PHONY: lint-workflows
+lint-workflows: ## Lint the v1.0-1 release-windows workflow with actionlint
+	@if command -v actionlint >/dev/null 2>&1; then \
+		echo "→ actionlint .github/workflows/release-windows.yml"; \
+		actionlint .github/workflows/release-windows.yml && \
+			echo "✓ actionlint clean (release-windows.yml)"; \
+	else \
+		echo "(actionlint not installed — \`brew install actionlint\` to enable; skipping)"; \
+	fi
+
 # ---- v0.2-3 community-cache bundle ----
 BUNDLE_DIR     := dist/community
 BUNDLE_VERSION ?= 1

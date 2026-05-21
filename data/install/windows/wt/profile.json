@@ -1,0 +1,26 @@
+{
+  "_comment": "aish — Windows Terminal profile fragment (v1.0-1, #133). Paste this object into the 'profiles -> list' array of your Windows Terminal settings.json. Locate the file via Windows Terminal: Settings -> Open JSON file, or directly at %LocalAppData%\\Packages\\Microsoft.WindowsTerminal_*\\LocalState\\settings.json.",
+  "guid": "{1c6dec98-3a4e-4f1d-9b2c-7f0e8b3a5d6c}",
+  "name": "aish",
+  "commandline": "aish.exe",
+  "icon": null,
+  "startingDirectory": "%USERPROFILE%",
+  "hidden": false,
+  "colorScheme": "Campbell",
+  "font": {
+    "face": "Cascadia Code",
+    "size": 11
+  },
+  "cursorShape": "bar",
+  "antialiasingMode": "grayscale",
+  "padding": "8, 8, 8, 8",
+  "snapOnInput": true,
+  "_install_notes": [
+    "1. Open Windows Terminal -> Settings -> 'Open JSON file' (Ctrl+Shift+,)",
+    "2. Find the 'profiles' object, then its 'list' array",
+    "3. Append this object as a new list item (remove the leading '_comment' and '_install_notes' fields; they are documentation only)",
+    "4. Save the file; Windows Terminal hot-reloads",
+    "5. The 'aish' profile now appears in the new-tab dropdown",
+    "6. (Optional) Set as default by copying this object's 'guid' into the top-level 'defaultProfile' field"
+  ]
+}
