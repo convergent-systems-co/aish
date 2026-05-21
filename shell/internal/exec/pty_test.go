@@ -176,10 +176,17 @@ func TestRunPTYStdinPassthrough(t *testing.T) {
 	parentOut := captureFile(t)
 	defer parentOut.cleanup()
 
-	// Push the input bytes into the parent-end pipe; close to send EOF
-	// so `cat` exits cleanly.
+	// Push the input bytes into the parent-end pipe. PTY line
+	// discipline doesn't propagate fd-close → child-EOF the way a
+	// raw pipe does — `cat` reads from the slave side and only
+	// stops on a Ctrl-D byte (0x04, the line-discipline EOF
+	// terminator). After delivering the byte we still close to
+	// unblock our own io.Copy goroutine.
 	go func() {
 		_, _ = childInDriver.WriteString("hello\n")
+		// small delay so `hello` flushes the line buffer before EOF
+		time.Sleep(50 * time.Millisecond)
+		_, _ = childInDriver.Write([]byte{0x04})
 		_ = childInDriver.Close()
 	}()
 

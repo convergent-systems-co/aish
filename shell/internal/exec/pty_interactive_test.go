@@ -34,8 +34,8 @@ func TestIsInteractive(t *testing.T) {
 		{"ls", false},
 		{"grep", false},
 		{"", false},
-		{"git", false},  // git pager triggers `less` internally; that's enough
-		{"gh", false},   // currently degrades cleanly without a PTY
+		{"git", false}, // git pager triggers `less` internally; that's enough
+		{"gh", false},  // currently degrades cleanly without a PTY
 		{"node", false},
 	}
 	for _, c := range cases {
