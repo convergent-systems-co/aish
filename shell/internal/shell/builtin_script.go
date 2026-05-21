@@ -139,11 +139,17 @@ func (s *Shell) migrateScriptBuiltin(args []string, stdout, stderr io.Writer) in
 
 // defaultReaders is the set wired into translate.Read for the
 // built-ins. Kept as a function so tests can swap it cheaply.
+//
+// PowerShell + Cmd readers (v1.0-3) are wired alongside the
+// pre-existing bash / zsh / fish trio; translate.Read dispatches
+// per Dialect, so adding readers here is additive.
 func defaultReaders() translate.Readers {
 	return translate.Readers{
-		Bash: reader.ReadBash,
-		Zsh:  reader.ReadZsh,
-		Fish: reader.ReadFish,
+		Bash:       reader.ReadBash,
+		Zsh:        reader.ReadZsh,
+		Fish:       reader.ReadFish,
+		PowerShell: reader.ReadPowerShell,
+		Cmd:        reader.ReadCmd,
 	}
 }
 

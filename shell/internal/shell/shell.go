@@ -637,7 +637,8 @@ func (s *Shell) ResolveTier(firstToken string) term.Tier {
 	switch firstToken {
 	case "cd", "export", "theme", "cache", "community", "plugin", "stats", "undo", "restore",
 		"run", "explain", "migrate", "persona", "secret", "identity",
-		"logout", "exec", "history":
+		"logout", "exec", "history",
+		"install", "service", "process", "env", "network":
 		return term.TierBuiltin
 	}
 	if isKnownBinary(firstToken, s.env) {
@@ -825,6 +826,48 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		rest := strings.TrimSpace(strings.TrimPrefix(line, "migrate"))
 		args := strings.Fields(rest)
 		s.SetLastExit(s.migrateScriptBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `install <pkg>` — v1.0-2 task #137. Windows-only at
+	// runtime (delegates to winget); non-Windows hosts surface a
+	// polite "not supported".
+	if line == "install" || strings.HasPrefix(line, "install ") || strings.HasPrefix(line, "install\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "install"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.installBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `service <list|status|start|stop>` — v1.0-2 task #138.
+	if line == "service" || strings.HasPrefix(line, "service ") || strings.HasPrefix(line, "service\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "service"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.serviceBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `process <list|kill>` — v1.0-2 task #139.
+	if line == "process" || strings.HasPrefix(line, "process ") || strings.HasPrefix(line, "process\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "process"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.processBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `env <list|get|set|unset>` — v1.0-2 task #140.
+	if line == "env" || strings.HasPrefix(line, "env ") || strings.HasPrefix(line, "env\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "env"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.envBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `network <interfaces|routes>` — v1.0-2 task #141.
+	if line == "network" || strings.HasPrefix(line, "network ") || strings.HasPrefix(line, "network\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "network"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.networkBuiltin(args, stdout, stderr))
 		return nil
 	}
 
