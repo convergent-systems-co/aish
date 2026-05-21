@@ -1,0 +1,141 @@
+{"intent": "list files", "os": "darwin", "invocation": "ls -la"}
+{"intent": "list files", "os": "linux", "invocation": "ls -la --color=auto"}
+{"intent": "list files", "os": "windows", "invocation": "Get-ChildItem"}
+{"intent": "list directories", "os": "darwin", "invocation": "ls -d */"}
+{"intent": "list directories", "os": "linux", "invocation": "ls -d */"}
+{"intent": "list directories", "os": "windows", "invocation": "Get-ChildItem -Directory"}
+{"intent": "show hidden files", "os": "darwin", "invocation": "ls -A"}
+{"intent": "show hidden files", "os": "linux", "invocation": "ls -A"}
+{"intent": "show hidden files", "os": "windows", "invocation": "Get-ChildItem -Force"}
+{"intent": "print working directory", "os": "darwin", "invocation": "pwd"}
+{"intent": "print working directory", "os": "linux", "invocation": "pwd"}
+{"intent": "print working directory", "os": "windows", "invocation": "Get-Location"}
+{"intent": "change directory home", "os": "darwin", "invocation": "cd ~"}
+{"intent": "change directory home", "os": "linux", "invocation": "cd ~"}
+{"intent": "change directory home", "os": "windows", "invocation": "Set-Location $HOME"}
+{"intent": "show current user", "os": "darwin", "invocation": "whoami"}
+{"intent": "show current user", "os": "linux", "invocation": "whoami"}
+{"intent": "show current user", "os": "windows", "invocation": "$env:USERNAME"}
+{"intent": "show hostname", "os": "darwin", "invocation": "hostname"}
+{"intent": "show hostname", "os": "linux", "invocation": "hostname"}
+{"intent": "show hostname", "os": "windows", "invocation": "$env:COMPUTERNAME"}
+{"intent": "show date", "os": "darwin", "invocation": "date"}
+{"intent": "show date", "os": "linux", "invocation": "date"}
+{"intent": "show date", "os": "windows", "invocation": "Get-Date"}
+{"intent": "show date utc", "os": "darwin", "invocation": "date -u"}
+{"intent": "show date utc", "os": "linux", "invocation": "date -u"}
+{"intent": "show date utc", "os": "windows", "invocation": "Get-Date -AsUTC"}
+{"intent": "show uptime", "os": "darwin", "invocation": "uptime"}
+{"intent": "show uptime", "os": "linux", "invocation": "uptime"}
+{"intent": "show uptime", "os": "windows", "invocation": "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime"}
+{"intent": "show disk usage", "os": "darwin", "invocation": "df -h"}
+{"intent": "show disk usage", "os": "linux", "invocation": "df -h"}
+{"intent": "show disk usage", "os": "windows", "invocation": "Get-PSDrive -PSProvider FileSystem"}
+{"intent": "show memory usage", "os": "darwin", "invocation": "vm_stat"}
+{"intent": "show memory usage", "os": "linux", "invocation": "free -h"}
+{"intent": "show memory usage", "os": "windows", "invocation": "Get-CimInstance Win32_OperatingSystem | Select FreePhysicalMemory,TotalVisibleMemorySize"}
+{"intent": "show processes", "os": "darwin", "invocation": "ps aux"}
+{"intent": "show processes", "os": "linux", "invocation": "ps -ef"}
+{"intent": "show processes", "os": "windows", "invocation": "Get-Process"}
+{"intent": "kill process by name", "os": "darwin", "invocation": "pkill -f"}
+{"intent": "kill process by name", "os": "linux", "invocation": "pkill -f"}
+{"intent": "kill process by name", "os": "windows", "invocation": "Stop-Process -Name"}
+{"intent": "show network interfaces", "os": "darwin", "invocation": "ifconfig"}
+{"intent": "show network interfaces", "os": "linux", "invocation": "ip addr show"}
+{"intent": "show network interfaces", "os": "windows", "invocation": "Get-NetIPAddress"}
+{"intent": "show listening ports", "os": "darwin", "invocation": "lsof -i -P -n | grep LISTEN"}
+{"intent": "show listening ports", "os": "linux", "invocation": "ss -tlnp"}
+{"intent": "show listening ports", "os": "windows", "invocation": "Get-NetTCPConnection -State Listen"}
+{"intent": "show public ip", "os": "darwin", "invocation": "curl -s ifconfig.me"}
+{"intent": "show public ip", "os": "linux", "invocation": "curl -s ifconfig.me"}
+{"intent": "show public ip", "os": "windows", "invocation": "(Invoke-WebRequest -Uri ifconfig.me -UseBasicParsing).Content"}
+{"intent": "ping google", "os": "darwin", "invocation": "ping -c 4 google.com"}
+{"intent": "ping google", "os": "linux", "invocation": "ping -c 4 google.com"}
+{"intent": "ping google", "os": "windows", "invocation": "Test-Connection google.com -Count 4"}
+{"intent": "show git status", "os": "darwin", "invocation": "git status"}
+{"intent": "show git status", "os": "linux", "invocation": "git status"}
+{"intent": "show git status", "os": "windows", "invocation": "git status"}
+{"intent": "show git log", "os": "darwin", "invocation": "git log --oneline -20"}
+{"intent": "show git log", "os": "linux", "invocation": "git log --oneline -20"}
+{"intent": "show git log", "os": "windows", "invocation": "git log --oneline -20"}
+{"intent": "git current branch", "os": "darwin", "invocation": "git rev-parse --abbrev-ref HEAD"}
+{"intent": "git current branch", "os": "linux", "invocation": "git rev-parse --abbrev-ref HEAD"}
+{"intent": "git current branch", "os": "windows", "invocation": "git rev-parse --abbrev-ref HEAD"}
+{"intent": "git pull", "os": "darwin", "invocation": "git pull --ff-only"}
+{"intent": "git pull", "os": "linux", "invocation": "git pull --ff-only"}
+{"intent": "git pull", "os": "windows", "invocation": "git pull --ff-only"}
+{"intent": "git push", "os": "darwin", "invocation": "git push"}
+{"intent": "git push", "os": "linux", "invocation": "git push"}
+{"intent": "git push", "os": "windows", "invocation": "git push"}
+{"intent": "show file size", "os": "darwin", "invocation": "du -h"}
+{"intent": "show file size", "os": "linux", "invocation": "du -h"}
+{"intent": "show file size", "os": "windows", "invocation": "Get-Item | Select Length"}
+{"intent": "show directory tree", "os": "darwin", "invocation": "find . -maxdepth 3 -print"}
+{"intent": "show directory tree", "os": "linux", "invocation": "find . -maxdepth 3 -print"}
+{"intent": "show directory tree", "os": "windows", "invocation": "Get-ChildItem -Recurse -Depth 2 | Select FullName"}
+{"intent": "find file by name", "os": "darwin", "invocation": "find . -name"}
+{"intent": "find file by name", "os": "linux", "invocation": "find . -name"}
+{"intent": "find file by name", "os": "windows", "invocation": "Get-ChildItem -Recurse -Filter"}
+{"intent": "search for text", "os": "darwin", "invocation": "grep -rn"}
+{"intent": "search for text", "os": "linux", "invocation": "grep -rn"}
+{"intent": "search for text", "os": "windows", "invocation": "Select-String -Pattern"}
+{"intent": "show first 10 lines", "os": "darwin", "invocation": "head -n 10"}
+{"intent": "show first 10 lines", "os": "linux", "invocation": "head -n 10"}
+{"intent": "show first 10 lines", "os": "windows", "invocation": "Get-Content -TotalCount 10"}
+{"intent": "show last 10 lines", "os": "darwin", "invocation": "tail -n 10"}
+{"intent": "show last 10 lines", "os": "linux", "invocation": "tail -n 10"}
+{"intent": "show last 10 lines", "os": "windows", "invocation": "Get-Content -Tail 10"}
+{"intent": "follow log file", "os": "darwin", "invocation": "tail -f"}
+{"intent": "follow log file", "os": "linux", "invocation": "tail -f"}
+{"intent": "follow log file", "os": "windows", "invocation": "Get-Content -Wait"}
+{"intent": "count lines", "os": "darwin", "invocation": "wc -l"}
+{"intent": "count lines", "os": "linux", "invocation": "wc -l"}
+{"intent": "count lines", "os": "windows", "invocation": "Measure-Object -Line"}
+{"intent": "make directory", "os": "darwin", "invocation": "mkdir -p"}
+{"intent": "make directory", "os": "linux", "invocation": "mkdir -p"}
+{"intent": "make directory", "os": "windows", "invocation": "New-Item -ItemType Directory -Force"}
+{"intent": "copy file", "os": "darwin", "invocation": "cp"}
+{"intent": "copy file", "os": "linux", "invocation": "cp"}
+{"intent": "copy file", "os": "windows", "invocation": "Copy-Item"}
+{"intent": "move file", "os": "darwin", "invocation": "mv"}
+{"intent": "move file", "os": "linux", "invocation": "mv"}
+{"intent": "move file", "os": "windows", "invocation": "Move-Item"}
+{"intent": "show environment variables", "os": "darwin", "invocation": "printenv"}
+{"intent": "show environment variables", "os": "linux", "invocation": "printenv"}
+{"intent": "show environment variables", "os": "windows", "invocation": "Get-ChildItem Env:"}
+{"intent": "show path", "os": "darwin", "invocation": "echo $PATH"}
+{"intent": "show path", "os": "linux", "invocation": "echo $PATH"}
+{"intent": "show path", "os": "windows", "invocation": "$env:PATH -split ';'"}
+{"intent": "show which command", "os": "darwin", "invocation": "which"}
+{"intent": "show which command", "os": "linux", "invocation": "which"}
+{"intent": "show which command", "os": "windows", "invocation": "Get-Command"}
+{"intent": "make file executable", "os": "darwin", "invocation": "chmod +x"}
+{"intent": "make file executable", "os": "linux", "invocation": "chmod +x"}
+{"intent": "make file executable", "os": "windows", "invocation": "Unblock-File"}
+{"intent": "extract tarball", "os": "darwin", "invocation": "tar -xzf"}
+{"intent": "extract tarball", "os": "linux", "invocation": "tar -xzf"}
+{"intent": "extract tarball", "os": "windows", "invocation": "tar -xzf"}
+{"intent": "create tarball", "os": "darwin", "invocation": "tar -czf"}
+{"intent": "create tarball", "os": "linux", "invocation": "tar -czf"}
+{"intent": "create tarball", "os": "windows", "invocation": "tar -czf"}
+{"intent": "download url", "os": "darwin", "invocation": "curl -O"}
+{"intent": "download url", "os": "linux", "invocation": "curl -O"}
+{"intent": "download url", "os": "windows", "invocation": "Invoke-WebRequest -OutFile"}
+{"intent": "show docker containers", "os": "darwin", "invocation": "docker ps"}
+{"intent": "show docker containers", "os": "linux", "invocation": "docker ps"}
+{"intent": "show docker containers", "os": "windows", "invocation": "docker ps"}
+{"intent": "show docker images", "os": "darwin", "invocation": "docker images"}
+{"intent": "show docker images", "os": "linux", "invocation": "docker images"}
+{"intent": "show docker images", "os": "windows", "invocation": "docker images"}
+{"intent": "show kubernetes pods", "os": "darwin", "invocation": "kubectl get pods"}
+{"intent": "show kubernetes pods", "os": "linux", "invocation": "kubectl get pods"}
+{"intent": "show kubernetes pods", "os": "windows", "invocation": "kubectl get pods"}
+{"intent": "show kubernetes contexts", "os": "darwin", "invocation": "kubectl config get-contexts"}
+{"intent": "show kubernetes contexts", "os": "linux", "invocation": "kubectl config get-contexts"}
+{"intent": "show kubernetes contexts", "os": "windows", "invocation": "kubectl config get-contexts"}
+{"intent": "clear screen", "os": "darwin", "invocation": "clear"}
+{"intent": "clear screen", "os": "linux", "invocation": "clear"}
+{"intent": "clear screen", "os": "windows", "invocation": "Clear-Host"}
+{"intent": "show last command exit code", "os": "darwin", "invocation": "echo $?"}
+{"intent": "show last command exit code", "os": "linux", "invocation": "echo $?"}
+{"intent": "show last command exit code", "os": "windows", "invocation": "$LASTEXITCODE"}

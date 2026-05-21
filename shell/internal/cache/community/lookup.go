@@ -112,6 +112,15 @@ func hashIntent(intent string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// HashIntentForBuild exposes the package-local hashIntent so the
+// cmd/aish-community build tool can compute identical hashes when
+// populating bundle.db at build time. Callers MUST NOT use this for
+// anything but bundle construction — the runtime path uses the
+// unexported helper.
+func HashIntentForBuild(intent string) string {
+	return hashIntent(intent)
+}
+
 // Lookup is the public entry point: open the underlying DB lazily,
 // then run the read-only query. On any I/O failure the bundle is
 // marked closed so subsequent calls return cleanly.

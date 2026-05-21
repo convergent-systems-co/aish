@@ -28,6 +28,8 @@ type Sidecar struct {
 	BundleVersion int    `json:"bundle_version"`
 	SignerID      string `json:"signer_id"`
 	SHA256        string `json:"sha256"`
+	IntentCount   int    `json:"intent_count"`
+	CreatedAt     string `json:"created_at"`
 	InstalledAt   string `json:"installed_at"`
 	SourcePath    string `json:"source_path"`
 }
@@ -131,6 +133,8 @@ func Install(srcDir, dotAish string, opts InstallOpts) (Manifest, error) {
 		BundleVersion: manifest.BundleVersion,
 		SignerID:      manifest.SignerID,
 		SHA256:        manifest.SHA256,
+		IntentCount:   manifest.IntentCount,
+		CreatedAt:     manifest.CreatedAt,
 		InstalledAt:   time.Now().UTC().Format(time.RFC3339),
 		SourcePath:    srcDir,
 	}
@@ -175,18 +179,26 @@ func OpenInstalled(dotAish string, logger io.Writer) (*Bundle, error) {
 			dbPath: dbPath,
 		}, nil
 	}
+	createdAt := sc.CreatedAt
+	if createdAt == "" {
+		// Sidecar predates the CreatedAt field — fall back to
+		// InstalledAt so `aish community info` still has something
+		// useful to print.
+		createdAt = sc.InstalledAt
+	}
 	m := Manifest{
 		FormatVersion: 1,
 		BundleVersion: sc.BundleVersion,
 		SignerID:      sc.SignerID,
 		SHA256:        sc.SHA256,
-		CreatedAt:     sc.InstalledAt,
+		IntentCount:   sc.IntentCount,
+		CreatedAt:     createdAt,
 	}
 	b := &Bundle{manifest: m, dbPath: dbPath}
-	if logger != nil && isStale(sc.InstalledAt) {
+	if logger != nil && isStale(createdAt) {
 		fmt.Fprintf(logger,
-			"aish community: warning: bundle older than %d days (installed=%s)\n",
-			StaleAfterDays, sc.InstalledAt)
+			"aish community: warning: bundle older than %d days (created=%s)\n",
+			StaleAfterDays, createdAt)
 	}
 	return b, nil
 }
