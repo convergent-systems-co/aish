@@ -23,13 +23,33 @@
 //	~/.aish/identity.toml            (active identity pointer)
 //	~/.aish/identities/<name>.toml   (per-identity profiles)
 //
-// # Non-goals (this PR)
+// # Backends
+//
+// As of v1.0-4, the package exposes a Backend interface (backend.go)
+// that captures the operations the `aish secret` built-in needs:
+// Set, Get, Rm, List, Has, Close. Two implementations exist:
+//
+//   - LocalVault (this package; default cross-platform) — the
+//     Argon2id + AES-256-GCM file vault documented above.
+//
+//   - WindowsBackend (backend_windows.go) — Credential Manager
+//     storage with DPAPI-wrapped values. Returned by
+//     OpenWindowsBackend; the `!windows` build of that constructor
+//     returns ErrUnsupported.
+//
+// Dispatch (the choice of which backend to use at runtime) is the
+// responsibility of the caller, not this package.
+//
+// # Non-goals (current scope)
 //
 //   - Parser-level taint propagation (#96, #98, #99).
-//   - OS keychain backends (#100, #101) — the Backend interface is
-//     reserved; LocalVault is the only implementation here.
+//   - macOS Keychain / freedesktop Secret Service backends
+//     (post-v1.0).
 //   - Persona-bound secrets (#105); the labels field is reserved but
 //     unused.
 //   - Passphrase change / rekey.
 //   - Vault export/import.
+//   - Built-in dispatch between LocalVault and WindowsBackend; the
+//     `secret` built-in still calls OpenVault unconditionally
+//     (deferred to v1.0-5).
 package secrets
