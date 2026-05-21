@@ -70,18 +70,24 @@ func (s *Shell) restoreBuiltin(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// countRestorablePaths returns the number of OpDelete-with-bytes
-// records in an event — the user-visible "files restored" count.
-// Directory markers (OpDelete with empty SnapshotDir) are excluded
-// because they don't represent restored content.
+// countRestorablePaths returns the number of records in an event
+// that carry byte content — the user-visible "files restored" count.
+// Directory markers (empty SnapshotDir) are excluded because they
+// don't represent restored content.
+//
+// v0.3-4 includes OpRename and OpModify rows alongside OpDelete so
+// `undo` reports the right count after a mv-overwrite.
 func countRestorablePaths(ev *history.Event) int {
 	if ev == nil {
 		return 0
 	}
 	n := 0
 	for _, a := range ev.Affected {
-		if a.Op == history.OpDelete && a.SnapshotDir != "" {
-			n++
+		switch a.Op {
+		case history.OpDelete, history.OpRename, history.OpModify:
+			if a.SnapshotDir != "" {
+				n++
+			}
 		}
 	}
 	return n
