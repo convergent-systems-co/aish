@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 )
 
@@ -83,13 +84,49 @@ func runOne(ctx context.Context, r Runner, st Statement, opts RunOptions) (int, 
 		}
 		return 0, nil
 	case Command:
-		return r.Run(ctx, formatCommand(v), opts.Stdin, opts.Stdout, opts.Stderr)
-	case Pipe:
-		stages := make([]string, len(v.Stages))
-		for i, c := range v.Stages {
-			stages[i] = formatCommand(c)
+		// Apply any redirects on this command at the engine layer
+		// (open files, wire them to the runner's streams) so the
+		// runner only ever sees the bare invocation. This keeps the
+		// runner's parser-feed independent of redirect syntax.
+		stdin, stdout, stderr, cleanup, err := applyRedirects(v.Redirects, opts.Stdin, opts.Stdout, opts.Stderr)
+		if err != nil {
+			fmt.Fprintf(opts.Stderr, "aish: run: line %d: %v\n", v.Line, err)
+			return 1, nil
 		}
-		return r.Run(ctx, strings.Join(stages, " | "), opts.Stdin, opts.Stdout, opts.Stderr)
+		code, runErr := r.Run(ctx, formatCommandNoRedirect(v), stdin, stdout, stderr)
+		cleanup()
+		return code, runErr
+	case Pipe:
+		// Apply each stage's redirects, then re-render the pipeline
+		// without redirect syntax so the existing pipeline parser
+		// doesn't have to know about it. Only the LAST stage gets
+		// the caller's stdout; intermediate redirects on inner
+		// stages aren't handled in MVP (and would be unusual —
+		// stdout redirect on a non-last stage usually doesn't make
+		// sense in a pipeline). Inner-stage redirects are flagged
+		// to stderr as a warning but not fatal.
+		stages := make([]string, len(v.Stages))
+		var cleanup func()
+		stdin, stdout, stderr := opts.Stdin, opts.Stdout, opts.Stderr
+		for i, c := range v.Stages {
+			if i == len(v.Stages)-1 && len(c.Redirects) > 0 {
+				ns, no, ne, cl, err := applyRedirects(c.Redirects, stdin, stdout, stderr)
+				if err != nil {
+					fmt.Fprintf(opts.Stderr, "aish: run: line %d: %v\n", c.Line, err)
+					return 1, nil
+				}
+				stdin, stdout, stderr = ns, no, ne
+				cleanup = cl
+			} else if i < len(v.Stages)-1 && len(c.Redirects) > 0 {
+				fmt.Fprintf(opts.Stderr, "aish: run: line %d: redirects on non-terminal pipeline stage ignored\n", c.Line)
+			}
+			stages[i] = formatCommandNoRedirect(c)
+		}
+		code, runErr := r.Run(ctx, strings.Join(stages, " | "), stdin, stdout, stderr)
+		if cleanup != nil {
+			cleanup()
+		}
+		return code, runErr
 	case Cond:
 		for _, br := range v.Branches {
 			code, err := runOne(ctx, r, br.Test, opts)
@@ -163,6 +200,70 @@ func runOne(ctx context.Context, r Runner, st Statement, opts RunOptions) (int, 
 		return 2, nil
 	}
 	return 0, nil
+}
+
+// formatCommandNoRedirect is like formatCommand but omits the
+// redirect operators. The engine handles redirects at the stream
+// layer (applyRedirects), so the underlying runner / parser never
+// needs to understand `>` syntax.
+func formatCommandNoRedirect(c Command) string {
+	parts := []string{c.Name}
+	for _, a := range c.Args {
+		parts = append(parts, maybeQuote(a))
+	}
+	return strings.Join(parts, " ")
+}
+
+// applyRedirects opens each redirect's target file and returns the
+// updated (stdin, stdout, stderr) plus a cleanup closure the caller
+// MUST invoke. Opening fails → error returned, original streams
+// unchanged. On success, cleanup closes every file we opened.
+func applyRedirects(rs []Redirect, stdin io.Reader, stdout, stderr io.Writer) (io.Reader, io.Writer, io.Writer, func(), error) {
+	opened := []*os.File{}
+	cleanup := func() {
+		for _, f := range opened {
+			_ = f.Close()
+		}
+	}
+	for _, r := range rs {
+		switch r.Op {
+		case RedirectIn:
+			f, err := os.Open(r.Target)
+			if err != nil {
+				cleanup()
+				return nil, nil, nil, func() {}, fmt.Errorf("open %s: %w", r.Target, err)
+			}
+			opened = append(opened, f)
+			stdin = f
+		case RedirectOut:
+			f, err := os.Create(r.Target)
+			if err != nil {
+				cleanup()
+				return nil, nil, nil, func() {}, fmt.Errorf("create %s: %w", r.Target, err)
+			}
+			opened = append(opened, f)
+			stdout = f
+		case RedirectAppend:
+			f, err := os.OpenFile(r.Target, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+			if err != nil {
+				cleanup()
+				return nil, nil, nil, func() {}, fmt.Errorf("open-append %s: %w", r.Target, err)
+			}
+			opened = append(opened, f)
+			stdout = f
+		case RedirectErrOut:
+			f, err := os.Create(r.Target)
+			if err != nil {
+				cleanup()
+				return nil, nil, nil, func() {}, fmt.Errorf("create %s: %w", r.Target, err)
+			}
+			opened = append(opened, f)
+			stderr = f
+		case RedirectErrToOut:
+			stderr = stdout
+		}
+	}
+	return stdin, stdout, stderr, cleanup, nil
 }
 
 // matchCasePattern is the MVP pattern matcher: literal equality and
