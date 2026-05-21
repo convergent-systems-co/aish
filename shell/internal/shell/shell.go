@@ -442,7 +442,8 @@ func (s *Shell) newCompleter() term.Completer {
 // depend on shell's dispatch internals.
 func (s *Shell) ResolveTier(firstToken string) term.Tier {
 	switch firstToken {
-	case "cd", "export", "theme", "cache", "stats", "undo", "restore":
+	case "cd", "export", "theme", "cache", "stats", "undo", "restore",
+		"run", "explain", "migrate":
 		return term.TierBuiltin
 	}
 	if isKnownBinary(firstToken, s.env) {
@@ -574,6 +575,35 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		rest := strings.TrimSpace(strings.TrimPrefix(line, "restore"))
 		args := strings.Fields(rest)
 		s.SetLastExit(s.restoreBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `run <script>` — v0.2-4. Parse + execute a bash/zsh/
+	// fish script through the existing dispatch tier. Each invocation
+	// builds a fresh env copy so in-script assignments don't leak.
+	if line == "run" || strings.HasPrefix(line, "run ") || strings.HasPrefix(line, "run\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "run"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.runScriptBuiltin(args, stdin, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `explain [--with-llm] <script>` — v0.2-4. Deterministic
+	// numbered description by default; optional LLM enrichment when
+	// --with-llm is passed AND an API key is available.
+	if line == "explain" || strings.HasPrefix(line, "explain ") || strings.HasPrefix(line, "explain\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "explain"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.explainScriptBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `migrate <script>` — v0.2-4. AST → aish-native script.
+	// Rule-based (no LLM) so output is reproducible.
+	if line == "migrate" || strings.HasPrefix(line, "migrate ") || strings.HasPrefix(line, "migrate\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "migrate"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.migrateScriptBuiltin(args, stdout, stderr))
 		return nil
 	}
 
