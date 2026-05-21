@@ -1,0 +1,167 @@
+# v1.0-1 — Windows release workflow.
+#
+# Triggers on tag pushes (v*) and manual dispatch. Cross-compiles the
+# Windows binaries from ubuntu-latest (pure-Go promise of the project
+# means no CGO toolchain needed for the shell) and uploads them as a
+# workflow artifact. On tag pushes, attaches the artifacts to a
+# GitHub Release.
+#
+# Code signing is dormant: the signing step runs only when
+# secrets.WINDOWS_CERT_PFX is set, which it is not in this PR. The
+# wiring lands today so v1.0-1b lights it up with a secret-only change.
+#
+# windows-smoke and windows-msi jobs are committed as `if: false` stubs
+# — v1.0-1b flips them on once a Windows runner is justified and the
+# WiX SDK is provisioned.
+#
+# Security: all user-controllable GitHub context (ref_name) is moved
+# into env: blocks before reaching `run:` shells, per the github.blog
+# workflow-injection guidance.
+
+name: release-windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag to attach artifacts to (leave blank for dry run)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: cross-compile windows binaries
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: ${{ steps.name.outputs.artifact_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: shell/go.mod
+          cache: true
+
+      - name: Lint workflows
+        uses: rhysd/actionlint@v1.7.7
+        with:
+          fail-on-error: 'true'
+
+      - name: Build Windows artifacts
+        run: make release-windows
+
+      - name: Determine artifact name
+        id: name
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ -n "$REF_NAME" ] && [ "$REF_TYPE" = "tag" ]; then
+            # Sanitize: only allow [A-Za-z0-9._-] in the artifact name
+            safe_name=$(printf '%s' "$REF_NAME" | tr -c 'A-Za-z0-9._-' '_')
+            printf 'artifact_name=aish-windows-%s\n' "$safe_name" >> "$GITHUB_OUTPUT"
+          else
+            printf 'artifact_name=aish-windows-%s\n' "$SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sign binaries (dormant — runs only when WINDOWS_CERT_PFX is set)
+        if: ${{ env.WINDOWS_CERT_PFX != '' }}
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+        run: |
+          echo "::warning::Signing path enabled but signtool is Windows-only"
+          echo "::warning::This branch should run on windows-latest — TODO(v1.0-1b)"
+          exit 1
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.artifact_name }}
+          path: |
+            dist/aish-windows-*.exe
+            dist/aish-windows-*.exe.sha256
+            dist/aish-windows-MANIFEST.txt
+            dist/aish-inference-cloud-windows-*.exe
+            dist/aish-inference-cloud-windows-*.exe.sha256
+            dist/aish-plugin-windows-*.exe
+            dist/aish-plugin-windows-*.exe.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attach to GitHub Release (tag pushes only)
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/aish-windows-*.exe
+            dist/aish-windows-*.exe.sha256
+            dist/aish-windows-MANIFEST.txt
+            dist/aish-inference-cloud-windows-*.exe
+            dist/aish-inference-cloud-windows-*.exe.sha256
+            dist/aish-plugin-windows-*.exe
+            dist/aish-plugin-windows-*.exe.sha256
+          fail_on_unmatched_files: true
+          draft: true
+          body: |
+            Windows binaries for this release.
+
+            Verify a binary:
+            ```
+            sha256sum -c aish-windows-amd64.exe.sha256
+            ```
+
+            See `aish-windows-MANIFEST.txt` for the full integrity manifest.
+
+  windows-smoke:
+    name: windows terminal compat smoke (deferred)
+    # Gated on the repo var AISH_WINDOWS_RUNNER_ENABLED.
+    # The variable is not set today; v1.0-1b flips it to 'true' when
+    # the Windows runner is justified (post v1.0-2 shell parity).
+    if: ${{ vars.AISH_WINDOWS_RUNNER_ENABLED == 'true' }}
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist
+
+      - name: Run Windows Terminal compat smoke
+        shell: pwsh
+        run: |
+          ./scripts/win/wt-compat-check.ps1 -BinaryPath dist/aish-windows-amd64.exe
+
+  windows-msi:
+    name: windows MSI build (deferred)
+    # Same gate as windows-smoke. Lights up in v1.0-1b alongside the
+    # WiX 4 SDK + code-signing cert.
+    if: ${{ vars.AISH_WINDOWS_RUNNER_ENABLED == 'true' }}
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          ./scripts/win/build-msi.ps1 -BinaryPath dist/aish-windows-amd64.exe -Arch amd64

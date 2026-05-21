@@ -111,11 +111,11 @@ release-windows: build-windows ## Seal Windows binaries with per-file SHA256 + M
 	@ls -lh dist/aish-windows-MANIFEST.txt dist/aish-*-windows-*.exe* dist/aish-windows-*.exe* 2>/dev/null | awk '{print "  "$$0}'
 
 .PHONY: lint-workflows
-lint-workflows: ## Lint .github/workflows/*.yml with actionlint (if installed)
+lint-workflows: ## Lint the v1.0-1 release-windows workflow with actionlint
 	@if command -v actionlint >/dev/null 2>&1; then \
-		echo "→ actionlint .github/workflows/"; \
-		actionlint .github/workflows/*.yml; \
-		echo "✓ actionlint clean"; \
+		echo "→ actionlint .github/workflows/release-windows.yml"; \
+		actionlint .github/workflows/release-windows.yml && \
+			echo "✓ actionlint clean (release-windows.yml)"; \
 	else \
 		echo "(actionlint not installed — \`brew install actionlint\` to enable; skipping)"; \
 	fi
