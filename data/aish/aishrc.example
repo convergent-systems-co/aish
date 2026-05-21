@@ -1,8 +1,16 @@
-# aishrc.example — sample login-shell RC for aish v0.3-1.
+# aishrc.example — sample login-shell RC for aish.
 #
-# Copy to ~/.aish/aishrc.toml to activate. The system-wide
-# counterpart lives at /etc/aish/aishrc (admin-managed); both
-# files are sourced in order, user wins on conflicts.
+# POSIX (linux / macOS):
+#   user file:    ~/.aish/aishrc.toml
+#   system file:  /etc/aish/aishrc   (admin-managed)
+#
+# Windows (v1.0-5):
+#   user file:    %APPDATA%\aish\aishrc.toml
+#                 (typically C:\Users\<you>\AppData\Roaming\aish\aishrc.toml)
+#   system file:  %PROGRAMDATA%\aish\aishrc.toml
+#                 (typically C:\ProgramData\aish\aishrc.toml)
+#
+# Both files are sourced in order, user wins on conflicts.
 #
 # The file is TOML. Missing fields are fine. Parse errors and
 # invalid umask values write a one-line warning to stderr and
