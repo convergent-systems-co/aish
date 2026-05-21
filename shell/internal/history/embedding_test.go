@@ -1,11 +1,4 @@
-//go:build phase_b
-
 // T1 tests — fastembed-go + bge-small-en-v1.5 embedder.
-//
-// Build-gated by `phase_b` so the seed commit ships with a green
-// `go build ./...`. Phase B's coder wave lands embedding_fastembed.go
-// (which these tests will then exercise) and flips the tag — or, more
-// cleanly, removes it once T1 is in.
 //
 // Acceptance criteria covered (from .artifacts/plans/112.md T1):
 //   - TestFastembed_DeterministicEmbedding — same input, same vector.
