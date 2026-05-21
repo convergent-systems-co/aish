@@ -24,6 +24,11 @@ var destructiveNames = map[string]struct{}{
 	"srm":      {},
 	"truncate": {},
 	"dd":       {},
+	// v0.3-4: mv joins the destructive set so a rename of an existing
+	// file gets snapshotted before exec. The interceptor distinguishes
+	// mv from rm via parser command-name and calls SnapshotMove rather
+	// than SnapshotMany.
+	"mv": {},
 }
 
 // flagsTakingValue records which short flags consume the next argv as
@@ -54,12 +59,10 @@ func IsDestructive(pl parser.Pipeline) bool {
 
 // TargetPaths returns the list of paths the destructive commands
 // target. For `rm /a /b /c` it returns [/a /b /c]; for `rm -rf ./dist`
-// it returns [./dist]; for `dd of=/tmp/x` it returns [/tmp/x]; for a
-// non-destructive pipeline it returns nil.
-//
-// The caller is expected to canonicalize each path against the shell
-// cwd before passing it to the Snapshotter — TargetPaths returns
-// argv-as-typed and is intentionally lossless about that.
+// it returns [./dist]; for `dd of=/tmp/x` it returns [/tmp/x]; for `mv
+// SRC DST` it returns [SRC] (the snapshot path) — DST is handled by
+// RenameTargets, not TargetPaths, because mv is a rename, not a
+// delete; for a non-destructive pipeline it returns nil.
 func TargetPaths(pl parser.Pipeline) []string {
 	var out []string
 	for _, c := range pl.Commands {
@@ -76,8 +79,51 @@ func TargetPaths(pl parser.Pipeline) []string {
 					out = append(out, rest)
 				}
 			}
+		case "mv":
+			// mv is handled through RenameTargets; emit the SOURCE
+			// paths only so the snapshotter takes their bytes. The
+			// DST path is snapshotted in the modify-pair branch
+			// inside the interceptor.
+			args := extractFileArgs(c.Args, nil)
+			if len(args) >= 2 {
+				// `mv SRC1 SRC2 ... DSTDIR` — all but the last are
+				// sources. `mv SRC DST` reduces to the same shape:
+				// one source, one destination.
+				out = append(out, args[:len(args)-1]...)
+			}
 		default:
 			out = append(out, extractFileArgs(c.Args, flagsTakingValue[c.Name])...)
+		}
+	}
+	return out
+}
+
+// RenameTargets returns the (src, dst) pairs for every `mv` invocation
+// in the pipeline. For `mv SRC DST` it returns [(SRC, DST)]; for `mv
+// SRC1 SRC2 DSTDIR` (multi-source mv) it returns one pair per source
+// with the destination derived as filepath.Join(DSTDIR, base(SRC)).
+// Non-mv stages produce no pairs.
+//
+// The caller canonicalizes the paths against the shell cwd — like
+// TargetPaths, this returns argv-as-typed.
+func RenameTargets(pl parser.Pipeline) [][2]string {
+	var out [][2]string
+	for _, c := range pl.Commands {
+		if c.Name != "mv" {
+			continue
+		}
+		args := extractFileArgs(c.Args, nil)
+		if len(args) < 2 {
+			continue
+		}
+		srcs := args[:len(args)-1]
+		dst := args[len(args)-1]
+		// `mv A B` — single source, single destination. The
+		// destination can be either a file path (rename) or a
+		// directory (move into); the interceptor checks at snapshot
+		// time and adjusts.
+		for _, s := range srcs {
+			out = append(out, [2]string{s, dst})
 		}
 	}
 	return out

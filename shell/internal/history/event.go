@@ -48,6 +48,11 @@ const (
 	// to ~/.aish/snapshots/ before execution. `aish undo` reads from
 	// these rows only.
 	KindSnapshot Kind = "snapshot"
+	// KindCheckpoint is a user-named pin in the timeline. v0.3-4
+	// `aish checkpoint <name>` writes one of these; `aish rollback
+	// <name>` walks forward from it. The Event.Name field carries
+	// the user-supplied label.
+	KindCheckpoint Kind = "checkpoint"
 )
 
 // Op is the per-affected-path verb. v0.1 scope is delete only;
@@ -65,6 +70,17 @@ const (
 	// destructive command will likely fail (`rm: no such file`); the
 	// event is still recorded so the audit trail is complete.
 	OpAbsent Op = "absent"
+	// OpRename is the v0.3-4 move/rename op. RenameTarget carries the
+	// destination path; Path carries the source. Both source bytes
+	// (pre-move) and destination bytes (pre-overwrite, when the
+	// target already existed) get snapshot rows.
+	OpRename Op = "rename"
+	// OpModify is the v0.3-4 modification op. Path carries the
+	// modified file; the snapshot row records its pre-modification
+	// bytes. Currently emitted only by mv-with-existing-target;
+	// shell-redirect overwrite (`>`, `>>`) joins in a later wave
+	// once the parser surfaces redirects.
+	OpModify Op = "modify"
 )
 
 // SkipReason is the populated subtype when Op == OpSkipped.
@@ -78,7 +94,8 @@ const (
 
 // Affected is one row in an event's affected[] list — one path that
 // the destructive command touches. `op` discriminates whether the
-// snapshot succeeded; `snapshot_dir` is populated only for OpDelete.
+// snapshot succeeded; `snapshot_dir` is populated only for OpDelete /
+// OpModify / OpRename (source side).
 type Affected struct {
 	Path        string `json:"path"`
 	Op          Op     `json:"op"`
@@ -93,11 +110,21 @@ type Affected struct {
 	// Bytes is the original file size in bytes. Informational; not
 	// used to gate restore. Populated for OpDelete rows only.
 	Bytes int64 `json:"bytes,omitempty"`
+	// RenameTarget is populated for Op == OpRename. It is the
+	// destination path of the mv operation; Path is the source.
+	// When the destination existed before the mv, a separate
+	// OpModify row carrying the prior DST bytes is also emitted.
+	RenameTarget string `json:"rename_target,omitempty"`
 }
 
 // Event is the on-wire shape of a single history row. Encoded as JSON
 // in the events.payload column; the SQL columns mirror id, timestamp,
 // kind so queries can filter without parsing the JSON blob.
+//
+// Signature / SignerID are populated by Store.Append via the Signer
+// seam. canonicalSigningMsg blanks them out before producing the
+// bytes that get signed, so they are carriers, never part of the
+// authenticated payload.
 type Event struct {
 	ID         string     `json:"id"`
 	Timestamp  time.Time  `json:"ts"`
@@ -107,6 +134,16 @@ type Event struct {
 	ExitCode   *int       `json:"exit_code"`
 	DurationMS int64      `json:"duration_ms,omitempty"`
 	Affected   []Affected `json:"affected,omitempty"`
+	// Name carries the user-supplied label for KindCheckpoint events.
+	// Empty for every other kind.
+	Name string `json:"name,omitempty"`
+	// Signature is the base64-encoded Ed25519 signature over the
+	// canonical bytes of this event (with Signature + SignerID
+	// blanked). Empty on pre-v0.3-4 events that migrated forward.
+	Signature string `json:"signature,omitempty"`
+	// SignerID identifies the key used to produce Signature. The
+	// v0.3-4 file-backed signer always sets this to LocalSignerID.
+	SignerID string `json:"signer_id,omitempty"`
 }
 
 // NewEventID returns a fresh event identifier. v0.1 uses 96 bits of
