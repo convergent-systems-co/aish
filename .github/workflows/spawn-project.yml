@@ -81,7 +81,7 @@ jobs:
       - name: Move linked issues on the project board
         if: steps.target.outputs.target != '' && steps.linked.outputs.numbers != ''
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          GH_TOKEN: ${{ secrets.ADD_TO_PROJECT_PAT }}
           OWNER: ${{ env.PROJECT_OWNER }}
           PROJECT_NUMBER: ${{ env.PROJECT_NUMBER }}
           FIELD_NAME: ${{ env.PIPELINE_FIELD_NAME }}
