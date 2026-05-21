@@ -133,16 +133,12 @@ func encodeSnapshot(s sshSnapshot) Snapshot {
 	return b.Bytes()
 }
 
-func decodeSnapshot(snap Snapshot) sshSnapshot {
-	out := sshSnapshot{}
-	for _, line := range bytes.Split(snap, []byte{'\n'}) {
-		if len(line) == 0 {
-			continue
-		}
-		out.Fingerprints = append(out.Fingerprints, string(line))
-	}
-	return out
-}
+// (decodeSnapshot intentionally omitted — Rollback targets the
+// specific fingerprint recorded in Apply.addedFingerprint, not the
+// captured set. The Snapshot's fingerprint list is forensic-only and
+// not deserialized within the adapter; the adversarial
+// !bytes.Contains(snap, privateKey) test exercises the bytes
+// directly without decoding.)
 
 // fingerprintOf returns the SHA-256 hex of the SSH wire-format public
 // key bytes.

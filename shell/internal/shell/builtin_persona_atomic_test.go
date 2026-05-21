@@ -421,7 +421,7 @@ func TestAtomicPersonaSwitch_HistoryEventBodyHasNoSecret(t *testing.T) {
 		"work-cluster", "W", "w@x.test")
 	s, home := newShellWithStagedPersona(t, "all-four", tomlBody)
 	if s.history == nil {
-		t.Skip("history not wired in test shell — cannot assert event-body redaction")
+		t.Fatal("history not wired in test shell — audit-boundary assertion impossible; this is a regression in newShellWithStagedPersona, not an environmental skip condition")
 	}
 	pemBytes := genTestEd25519PEM(t)
 	sock := startFakeAgent(t)
