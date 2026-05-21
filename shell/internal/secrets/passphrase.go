@@ -75,8 +75,18 @@ func ReadValueFrom(r io.Reader) ([]byte, error) {
 // preceding bytes with \r stripped. EOF before any data is treated as
 // an empty line (not an error) so callers can distinguish "user typed
 // nothing" from "stream broke."
+//
+// If r is already a *bufio.Reader, use it directly — wrapping it in a
+// fresh bufio.Reader would create an inner buffer that swallows the
+// subsequent line. This matters when the caller drives passphrase
+// then value through a single shared reader.
 func readLineStripped(r io.Reader) ([]byte, error) {
-	br := bufio.NewReader(r)
+	var br *bufio.Reader
+	if existing, ok := r.(*bufio.Reader); ok {
+		br = existing
+	} else {
+		br = bufio.NewReader(r)
+	}
 	line, err := br.ReadBytes('\n')
 	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("secrets: read: %w", err)

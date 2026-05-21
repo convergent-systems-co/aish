@@ -58,7 +58,7 @@ type vaultHeader struct {
 }
 
 type vaultKDFMeta struct {
-	Algo        string `json:"algo"`        // always "argon2id"
+	Algo        string `json:"algo"` // always "argon2id"
 	Time        uint32 `json:"time"`
 	Memory      uint32 `json:"memory_kib"`
 	Parallelism uint8  `json:"parallelism"`
