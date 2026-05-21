@@ -1,10 +1,5 @@
-//go:build phase_b
-
-// T2 tests — sqlite-vec vector store wrapper.
-//
-// Build-gated by `phase_b`; the seed commit ships without these
-// compiling. Phase B's coder wave lands vector_store.go and flips
-// the tag.
+// T2 tests — chromem-go vector store wrapper (post-Phase-A swap from
+// sqlite-vec; modernc.org/sqlite cannot load C extensions).
 //
 // Acceptance criteria covered (from .artifacts/plans/112.md T2):
 //   - TestVectorStore_UpsertQueryRoundTrip — random vectors → exact

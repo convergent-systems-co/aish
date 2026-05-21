@@ -4,21 +4,21 @@ go 1.25.0
 
 require (
 	github.com/BurntSushi/toml v1.6.0
+	github.com/anush008/fastembed-go v1.0.0
 	github.com/convergent-systems-co/aish/libs/proto v0.0.0
 	github.com/creack/pty v1.1.24
+	github.com/philippgille/chromem-go v0.7.0
 	golang.org/x/crypto v0.51.0
 	golang.org/x/sys v0.44.0
 	golang.org/x/term v0.43.0
 	modernc.org/sqlite v1.50.1
 )
 
-require gopkg.in/yaml.v3 v3.0.1 // indirect
+require gopkg.in/yaml.v3 v3.0.1
 
 require (
-	github.com/anush008/fastembed-go v1.0.0 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
-	github.com/philippgille/chromem-go v0.7.0 // indirect
 	github.com/rivo/uniseg v0.4.6 // indirect
 	github.com/schollz/progressbar/v2 v2.15.0 // indirect
 	github.com/schollz/progressbar/v3 v3.14.1 // indirect

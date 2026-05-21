@@ -1,9 +1,7 @@
-//go:build phase_b
-
-// Shared helpers for the phase_b-tagged test suite (T1..T5). The
-// seed-level tests have their own (smaller) helpers in
-// embedding_types_test.go and schema_vec_test.go and do NOT depend
-// on this file.
+// Shared helpers for the Phase B test suite (T1..T5). Used by
+// the embedding, vector-store, embed-writer, search, and reindex
+// tests; safe to compile alongside seed-level tests because the
+// helpers here are pure functions, not test functions.
 
 package history
 

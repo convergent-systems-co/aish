@@ -67,14 +67,23 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("history: pragma: %w", err)
 	}
+	s := &Store{db: db}
+	// Pre-DDL migrate: when a pre-v0.3-4 events table is present
+	// without the v0.3-4 columns (signature, signer_id, name), the
+	// post-#112 DDL's `CREATE INDEX … ON events(name)` fails at
+	// parse time with "no such column: name" before any
+	// ADD-COLUMN can run. Probing first and running migrate before
+	// DDL re-application keeps the migration order correct: add
+	// columns, then re-apply triggers/indexes that reference them.
+	// On a fresh-install DB the probe sees no events table and
+	// migrate is a no-op; the post-migrate DDL creates everything.
+	if err := s.migrate(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("history: pre-DDL migrate: %w", err)
+	}
 	if _, err := db.Exec(DDL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("history: apply DDL: %w", err)
-	}
-	s := &Store{db: db}
-	if err := s.migrate(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("history: migrate: %w", err)
 	}
 	if err := s.migrateVec(); err != nil {
 		// Vec migration is best-effort. Semantic search degrades
@@ -190,15 +199,31 @@ func (s *Store) VectorStore() VectorStore {
 
 // migrate walks migrationProbes and ALTER TABLE … ADD COLUMNs the
 // columns missing from a pre-v0.3-4 events / snapshots table. A
-// fresh-install DB hits no work — the columns exist from the DDL.
+// fresh-install DB hits no work — the table doesn't exist yet, the
+// probe sees no candidate to ADD against, and the post-DDL pass
+// creates the full schema. A pre-v0.3-4 DB hits real work: ADD
+// COLUMN for signature, signer_id, name, rename_target before the
+// DDL's `CREATE INDEX … ON events(name)` runs, which would
+// otherwise fail at parse time on the missing column.
 //
-// The FTS5 trigger pair recreated in DDL is also idempotent because
+// The FTS5 trigger pair recreated in DDL is idempotent because
 // every CREATE there is `IF NOT EXISTS`. The FTS index itself is
 // rebuilt by a one-shot `INSERT INTO events_fts(events_fts) VALUES
 // ('rebuild')` so a migrated DB with pre-existing event rows ends up
 // indexed without forcing the user to re-write every command.
 func (s *Store) migrate() error {
 	for _, p := range migrationProbes {
+		exists, err := s.tableExists(p.Table)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			// Fresh-install path: the post-migrate DDL pass will
+			// create the table with all v0.3-4 columns. Skipping
+			// the ADD COLUMN here avoids a `no such table` error
+			// on the very first Open.
+			continue
+		}
 		have, err := s.columnExists(p.Table, p.Column)
 		if err != nil {
 			return err
@@ -214,9 +239,29 @@ func (s *Store) migrate() error {
 	// triggers (re-)created by DDL only index rows inserted AFTER
 	// the trigger exists; a rebuild covers the pre-trigger backlog.
 	// Best-effort: an error here doesn't block the open — search
-	// degrades to "no results" rather than crashing the shell.
+	// degrades to "no results" rather than crashing the shell. This
+	// also no-ops cleanly when events_fts does not yet exist (the
+	// fresh-install path before the post-migrate DDL pass).
 	_, _ = s.db.Exec(`INSERT INTO events_fts(events_fts) VALUES('rebuild')`)
 	return nil
+}
+
+// tableExists returns whether a table with the given name is
+// present in sqlite_master. Used by migrate to distinguish the
+// fresh-install path (no events table yet → skip ADD COLUMN, let
+// DDL create it) from the pre-v0.3-4 path (events table exists,
+// missing some columns → ADD COLUMN before DDL re-applies triggers
+// and indexes that reference those columns).
+func (s *Store) tableExists(name string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`,
+		name,
+	).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("sqlite_master probe %s: %w", name, err)
+	}
+	return n > 0, nil
 }
 
 func (s *Store) columnExists(table, column string) (bool, error) {
