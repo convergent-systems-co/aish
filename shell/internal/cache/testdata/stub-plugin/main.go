@@ -86,8 +86,23 @@ func main() {
 			_ = enc.Encode(&proto.Response{JSONRPC: proto.Version, ID: req.ID, Result: &t2})
 			_ = enc.Encode(&proto.Response{JSONRPC: proto.Version, ID: req.ID, Result: &c})
 		case proto.MethodEmbed:
-			// Emit one embedding frame with a deterministic vector
-			// derived from the intent text — lets tests reason about
+			// Optional "this plugin does not implement embed" mode —
+			// enabled by setting STUB_EMBED_NOT_IMPLEMENTED=1 in the
+			// test env. Lets cache_test exercise the
+			// ErrEmbedNotImplemented sentinel path without rebuilding
+			// the stub for each scenario. The error code matches
+			// proto.CodeNotImplemented so the cache's typed branch
+			// activates.
+			if os.Getenv("STUB_EMBED_NOT_IMPLEMENTED") == "1" {
+				_ = enc.Encode(&proto.Response{
+					JSONRPC: proto.Version,
+					ID:      req.ID,
+					Error:   &proto.Error{Code: proto.CodeNotImplemented, Message: proto.ErrEmbedNotImplemented.Error()},
+				})
+				continue
+			}
+			// Default mode — emit one embedding frame with a deterministic
+			// vector derived from the intent text so tests can reason about
 			// similarity outcomes without floating-point flakiness.
 			e := proto.Frame{
 				Type:   proto.KindEmbedding,
