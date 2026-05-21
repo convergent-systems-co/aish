@@ -2,6 +2,7 @@ package history
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,8 +19,13 @@ import (
 // shell/internal/cache.Store: one writer at a time via MaxOpenConns=1,
 // WAL for non-blocking readers. The single-file DB at the caller-
 // supplied path is canonical state.
+//
+// signer is the per-event Ed25519 signer. Nil-safe: a nil signer
+// emits events with empty Signature / SignerID columns. Set via
+// WithSigner; the production wire-up is shell.openHistory.
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	signer Signer
 }
 
 // Open opens (or creates) the SQLite database at path and applies the
@@ -45,7 +51,85 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("history: apply DDL: %w", err)
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	if err := s.migrate(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("history: migrate: %w", err)
+	}
+	return s, nil
+}
+
+// WithSigner attaches a Signer; subsequent Append / Checkpoint calls
+// will populate Event.Signature + Event.SignerID. Idempotent — calling
+// twice replaces the prior signer. Nil signer disables signing.
+func (s *Store) WithSigner(signer Signer) *Store {
+	if s == nil {
+		return nil
+	}
+	s.signer = signer
+	return s
+}
+
+// Signer returns the currently-attached signer. Nil when no signing
+// is configured. Exposed so the shell can route the same key into
+// future audit consumers (e.g. the v0.3-LOGIN audit stream).
+func (s *Store) Signer() Signer {
+	if s == nil {
+		return nil
+	}
+	return s.signer
+}
+
+// migrate walks migrationProbes and ALTER TABLE … ADD COLUMNs the
+// columns missing from a pre-v0.3-4 events / snapshots table. A
+// fresh-install DB hits no work — the columns exist from the DDL.
+//
+// The FTS5 trigger pair recreated in DDL is also idempotent because
+// every CREATE there is `IF NOT EXISTS`. The FTS index itself is
+// rebuilt by a one-shot `INSERT INTO events_fts(events_fts) VALUES
+// ('rebuild')` so a migrated DB with pre-existing event rows ends up
+// indexed without forcing the user to re-write every command.
+func (s *Store) migrate() error {
+	for _, p := range migrationProbes {
+		have, err := s.columnExists(p.Table, p.Column)
+		if err != nil {
+			return err
+		}
+		if have {
+			continue
+		}
+		if _, err := s.db.Exec(p.AddColumnDDL); err != nil {
+			return fmt.Errorf("ADD COLUMN %s.%s: %w", p.Table, p.Column, err)
+		}
+	}
+	// FTS5 rebuild so migrated rows are searchable. Pre-existing
+	// triggers (re-)created by DDL only index rows inserted AFTER
+	// the trigger exists; a rebuild covers the pre-trigger backlog.
+	// Best-effort: an error here doesn't block the open — search
+	// degrades to "no results" rather than crashing the shell.
+	_, _ = s.db.Exec(`INSERT INTO events_fts(events_fts) VALUES('rebuild')`)
+	return nil
+}
+
+func (s *Store) columnExists(table, column string) (bool, error) {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, fmt.Errorf("table_info %s: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // Close releases the database handle. Idempotent; a second Close on
@@ -64,6 +148,14 @@ func (s *Store) Close() error {
 // matching Finalize call after the destructive command returns fills
 // exit_code + duration_ms.
 //
+// When a Signer is attached (WithSigner) the event is signed before
+// persistence: canonicalSigningMsg blanks Signature + SignerID so
+// they cannot themselves be part of what gets signed; the resulting
+// signature is base64-encoded and stored on both the SQL column and
+// the JSON payload mirror. A nil signer is silent — Signature stays
+// empty and the row is still persisted (degradation per the v0.3-4
+// plan: signing is best-effort, persistence is mandatory).
+//
 // The whole insertion is one transaction. If the snapshot table write
 // fails, the event row rolls back so we never end up with an event
 // pointing at non-existent snapshot rows (the symmetric failure mode
@@ -74,6 +166,23 @@ func (s *Store) Append(e *Event) error {
 	}
 	if e.ID == "" {
 		return errors.New("history: Append: event has empty ID")
+	}
+	if s.signer != nil {
+		// Blank the carrier fields just in case the caller pre-set
+		// them; canonicalSigningMsg does this on its own clone but we
+		// also want the persisted event to carry the right values.
+		e.Signature = ""
+		e.SignerID = ""
+		msg, err := canonicalSigningMsg(e)
+		if err != nil {
+			return fmt.Errorf("history: canonicalize for signing: %w", err)
+		}
+		sig, err := s.signer.Sign(msg)
+		if err != nil {
+			return fmt.Errorf("history: sign: %w", err)
+		}
+		e.Signature = base64.StdEncoding.EncodeToString(sig)
+		e.SignerID = s.signer.SignerID()
 	}
 	payload, err := json.Marshal(e)
 	if err != nil {
@@ -86,22 +195,134 @@ func (s *Store) Append(e *Event) error {
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.Exec(
-		`INSERT INTO events(id, ts, kind, command, cwd, exit_code, duration_ms, payload)
-		 VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)`,
+		`INSERT INTO events(id, ts, kind, command, cwd, exit_code, duration_ms, payload, signature, signer_id, name)
+		 VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
 		e.ID, e.Timestamp.UTC(), string(e.Kind), e.Command, e.Cwd, string(payload),
+		e.Signature, e.SignerID, e.Name,
 	); err != nil {
 		return fmt.Errorf("history: insert event: %w", err)
 	}
 	for _, a := range e.Affected {
 		if _, err := tx.Exec(
-			`INSERT INTO snapshots(event_id, path, op, snapshot_dir, skip_reason, sha256, bytes, ts)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			e.ID, a.Path, string(a.Op), a.SnapshotDir, a.SkipReason, a.SHA256, a.Bytes, e.Timestamp.UTC(),
+			`INSERT INTO snapshots(event_id, path, op, snapshot_dir, skip_reason, sha256, bytes, ts, rename_target)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			e.ID, a.Path, string(a.Op), a.SnapshotDir, a.SkipReason, a.SHA256, a.Bytes, e.Timestamp.UTC(), a.RenameTarget,
 		); err != nil {
 			return fmt.Errorf("history: insert snapshot: %w", err)
 		}
 	}
 	return tx.Commit()
+}
+
+// Checkpoint writes a KindCheckpoint event named `name`. The event
+// has an empty affected list — checkpoints are pure markers; the
+// rollback path queries events newer than the checkpoint and restores
+// from their snapshots.
+//
+// An empty `name` is rejected — the rollback API addresses checkpoints
+// by name, and an unnamed checkpoint would be unaddressable.
+func (s *Store) Checkpoint(name string) (*Event, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("history: Checkpoint: store is closed")
+	}
+	if name == "" {
+		return nil, errors.New("history: Checkpoint: name is empty")
+	}
+	exit := 0
+	ev := &Event{
+		ID:        NewEventID(),
+		Timestamp: time.Now().UTC(),
+		Kind:      KindCheckpoint,
+		Command:   "checkpoint " + name,
+		Name:      name,
+		ExitCode:  &exit,
+	}
+	if err := s.Append(ev); err != nil {
+		return nil, err
+	}
+	// Checkpoints are "born finalized" — no destructive command to
+	// race with. Mirror that by setting exit_code immediately so the
+	// row shows finished in queries that filter on exit_code IS NOT
+	// NULL (the same filter undo / restore use).
+	if _, err := s.db.Exec(
+		`UPDATE events SET exit_code = 0, duration_ms = 0 WHERE id = ?`,
+		ev.ID,
+	); err != nil {
+		return ev, fmt.Errorf("history: Checkpoint finalize: %w", err)
+	}
+	return ev, nil
+}
+
+// CheckpointByName returns the most-recent KindCheckpoint event whose
+// name == `name`. Returns (nil, nil) when no such checkpoint exists.
+func (s *Store) CheckpointByName(name string) (*Event, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("history: CheckpointByName: store is closed")
+	}
+	if name == "" {
+		return nil, errors.New("history: CheckpointByName: name is empty")
+	}
+	row := s.db.QueryRow(
+		`SELECT payload FROM events
+		   WHERE kind = ? AND name = ?
+		   ORDER BY ts DESC, id DESC LIMIT 1`,
+		string(KindCheckpoint), name,
+	)
+	var payload string
+	if err := row.Scan(&payload); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("history: CheckpointByName scan: %w", err)
+	}
+	var ev Event
+	if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+		return nil, fmt.Errorf("history: CheckpointByName unmarshal: %w", err)
+	}
+	return &ev, nil
+}
+
+// EventsSinceCheckpoint returns every KindSnapshot event with
+// timestamp > checkpoint.Timestamp, newest first. Used by the
+// rollback flow: walk the returned events oldest-to-newest, calling
+// RestoreEvent on each to bring the filesystem back to the
+// checkpoint state.
+//
+// The newest-first ordering is the natural SQL ORDER BY direction;
+// the caller is expected to reverse the slice before applying
+// restores so older events restore first.
+func (s *Store) EventsSinceCheckpoint(cp *Event) ([]*Event, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("history: EventsSinceCheckpoint: store is closed")
+	}
+	if cp == nil {
+		return nil, errors.New("history: EventsSinceCheckpoint: nil checkpoint")
+	}
+	rows, err := s.db.Query(
+		`SELECT payload FROM events
+		   WHERE kind = ?
+		     AND ts > ?
+		     AND exit_code IS NOT NULL
+		   ORDER BY ts DESC, id DESC`,
+		string(KindSnapshot), cp.Timestamp.UTC(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("history: EventsSinceCheckpoint: %w", err)
+	}
+	defer rows.Close()
+	var out []*Event
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return nil, err
+		}
+		var ev Event
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			continue
+		}
+		out = append(out, &ev)
+	}
+	return out, rows.Err()
 }
 
 // Finalize writes back the exit_code and duration after the
@@ -177,45 +398,53 @@ func (s *Store) LatestRestorable() (*Event, error) {
 	if err := json.Unmarshal([]byte(payload), &ev); err != nil {
 		return nil, fmt.Errorf("history: LatestRestorable unmarshal: %w", err)
 	}
-	// A restorable event needs at least one OpDelete in its affected
-	// list, otherwise there is nothing to restore (all paths were
-	// skipped or absent). Filter here so the caller does not see a
-	// useless event.
-	hasDelete := false
+	// A restorable event needs at least one row with byte content
+	// (OpDelete, OpRename, or OpModify with a SnapshotDir). Filter
+	// here so the caller does not see a useless event.
+	hasContent := false
 	for _, a := range ev.Affected {
-		if a.Op == OpDelete && a.SnapshotDir != "" {
-			hasDelete = true
+		switch a.Op {
+		case OpDelete, OpRename, OpModify:
+			if a.SnapshotDir != "" {
+				hasContent = true
+			}
+		}
+		if hasContent {
 			break
 		}
 	}
-	if !hasDelete {
+	if !hasContent {
 		return nil, nil
 	}
 	return &ev, nil
 }
 
-// SnapshotsForPath returns the most-recent OpDelete snapshot whose
+// SnapshotsForPath returns the most-recent restorable snapshot whose
 // path == the requested path. Returns (nil, nil) when no candidate
 // exists. The matching event's exit_code must be set; in-flight
 // commands are not restore candidates (same rationale as
 // LatestRestorable).
+//
+// v0.3-4: also matches OpRename and OpModify rows so `restore <path>`
+// can roll back a rename or a modification, not just a delete.
 func (s *Store) SnapshotsForPath(path string) (*Affected, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("history: SnapshotsForPath: store is closed")
 	}
 	row := s.db.QueryRow(
-		`SELECT s.path, s.op, s.snapshot_dir, s.skip_reason, s.sha256, s.bytes
+		`SELECT s.path, s.op, s.snapshot_dir, s.skip_reason, s.sha256, s.bytes, s.rename_target
 		   FROM snapshots s
 		   JOIN events e ON e.id = s.event_id
 		  WHERE s.path = ?
-		    AND s.op = ?
+		    AND s.op IN (?, ?, ?)
+		    AND s.snapshot_dir != ''
 		    AND e.exit_code IS NOT NULL
 		  ORDER BY s.ts DESC LIMIT 1`,
-		path, string(OpDelete),
+		path, string(OpDelete), string(OpRename), string(OpModify),
 	)
 	var a Affected
 	var op string
-	if err := row.Scan(&a.Path, &op, &a.SnapshotDir, &a.SkipReason, &a.SHA256, &a.Bytes); err != nil {
+	if err := row.Scan(&a.Path, &op, &a.SnapshotDir, &a.SkipReason, &a.SHA256, &a.Bytes, &a.RenameTarget); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}

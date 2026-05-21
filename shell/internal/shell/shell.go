@@ -346,6 +346,14 @@ func (s *Shell) openHistory(e *env.Env) {
 	if err != nil {
 		return
 	}
+	// v0.3-4: attach the per-install signer so every Append /
+	// Checkpoint event carries a verifiable Ed25519 signature.
+	// Failures here are non-fatal — the store keeps working
+	// unsigned, the rest of the engine still functions. The
+	// degradation matches the rest of openHistory's posture.
+	if signer, signErr := history.NewFileSigner(history.DefaultKeyPath(dotAish)); signErr == nil {
+		store.WithSigner(signer)
+	}
 	cfg := history.LoadConfig(dotAish)
 	snapRoot := filepath.Join(dotAish, "snapshots")
 	sn := history.NewSnapshotter(snapRoot, cfg.SnapshotMaxBytes, history.DefaultIgnoreMatcher())
@@ -629,7 +637,7 @@ func (s *Shell) ResolveTier(firstToken string) term.Tier {
 	switch firstToken {
 	case "cd", "export", "theme", "cache", "community", "plugin", "stats", "undo", "restore",
 		"run", "explain", "migrate", "persona", "secret", "identity",
-		"logout", "exec":
+		"logout", "exec", "history":
 		return term.TierBuiltin
 	}
 	if isKnownBinary(firstToken, s.env) {
@@ -779,6 +787,15 @@ func (s *Shell) dispatch(line string, stdin io.Reader, stdout, stderr io.Writer)
 		rest := strings.TrimSpace(strings.TrimPrefix(line, "restore"))
 		args := strings.Fields(rest)
 		s.SetLastExit(s.restoreBuiltin(args, stdout, stderr))
+		return nil
+	}
+
+	// Built-in: `history list | show | search | purge | checkpoint |
+	// rollback`. Per v0.3-4 acceptance (#108–#113).
+	if line == "history" || strings.HasPrefix(line, "history ") || strings.HasPrefix(line, "history\t") {
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "history"))
+		args := strings.Fields(rest)
+		s.SetLastExit(s.historyBuiltin(args, stdout, stderr))
 		return nil
 	}
 

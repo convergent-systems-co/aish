@@ -154,6 +154,94 @@ func (s *Snapshotter) SnapshotMany(paths []string) ([]Affected, error) {
 	return out, nil
 }
 
+// SnapshotMove records the bytes touched by a `mv src dst` operation.
+// Behavior:
+//   - SRC bytes are snapshotted (OpRename, RenameTarget=DST).
+//   - When DST already exists as a regular file, its bytes are
+//     snapshotted too (OpModify) so a future restore can roll back
+//     the overwrite separately from the rename.
+//   - When DST is an existing directory, the actual move places SRC
+//     inside it; the recorded DST is filepath.Join(DST, base(SRC))
+//     so a later RestoreEvent moves the right bytes back.
+//
+// The function returns the slice of Affected rows. As with SnapshotMany,
+// per-file failure degrades to OpSkipped — never an error that would
+// abort the destructive command.
+func (s *Snapshotter) SnapshotMove(src, dst string) []Affected {
+	if s == nil {
+		return nil
+	}
+	var out []Affected
+
+	srcStat, srcErr := os.Stat(src)
+	resolvedDst := dst
+	if dstStat, err := os.Stat(dst); err == nil && dstStat.IsDir() {
+		// `mv SRC DSTDIR` → effective target is DSTDIR/base(SRC).
+		resolvedDst = filepath.Join(dst, filepath.Base(src))
+	}
+
+	if srcErr != nil {
+		if errors.Is(srcErr, fs.ErrNotExist) {
+			// Mv of a non-existent source — record the absent row;
+			// mv itself will fail and the user sees the error.
+			out = append(out, Affected{
+				Path: src, Op: OpAbsent, RenameTarget: resolvedDst,
+			})
+		} else {
+			out = append(out, Affected{
+				Path: src, Op: OpSkipped, SkipReason: "stat-failed",
+				RenameTarget: resolvedDst,
+			})
+		}
+	} else if srcStat.IsDir() {
+		// Directory rename: emit one marker for the dir itself, then
+		// walk and snapshot each regular file inside. This mirrors
+		// SnapshotMany's directory handling — the marker row drives
+		// MkdirAll on restore, the children carry the bytes.
+		out = append(out, Affected{Path: src, Op: OpRename, RenameTarget: resolvedDst})
+		_ = filepath.WalkDir(src, func(child string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil || child == src {
+				return nil
+			}
+			if d.IsDir() {
+				out = append(out, Affected{Path: child, Op: OpDelete})
+				return nil
+			}
+			rec, _ := s.Snapshot(child)
+			out = append(out, rec)
+			return nil
+		})
+	} else {
+		// Regular file: copy bytes, emit OpRename row.
+		rec, _ := s.Snapshot(src)
+		// Snapshot returns OpDelete on success; we promote to
+		// OpRename and attach the target.
+		if rec.Op == OpDelete {
+			rec.Op = OpRename
+			rec.RenameTarget = resolvedDst
+		} else {
+			// Preserve OpSkipped / OpAbsent; just carry the target.
+			rec.RenameTarget = resolvedDst
+		}
+		out = append(out, rec)
+	}
+
+	// If the resolved destination already exists, snapshot its prior
+	// bytes as an OpModify so a future restore can decide whether to
+	// roll back just the overwrite. Mv of a directory-onto-directory
+	// is a rare edge case POSIX rejects; we don't try to snapshot
+	// the destination tree there.
+	if dstStat, err := os.Stat(resolvedDst); err == nil && !dstStat.IsDir() {
+		modRec, _ := s.Snapshot(resolvedDst)
+		if modRec.Op == OpDelete {
+			modRec.Op = OpModify
+		}
+		out = append(out, modRec)
+	}
+
+	return out
+}
+
 // Restore copies the snapshotted bytes back to rec.Path. Returns an
 // error when:
 //   - the snapshot file has rotted (sha256 mismatch against rec.SHA256)
@@ -162,7 +250,27 @@ func (s *Snapshotter) SnapshotMany(paths []string) ([]Affected, error) {
 //
 // The directory-marker case (Op=OpDelete with empty SnapshotDir) is
 // handled by MkdirAll: it re-creates the empty directory.
+//
+// OpRename restores walk the bytes from the snapshot back to rec.Path,
+// effectively "un-renaming" the file. If a RenameTarget exists on
+// disk and its bytes match what we snapshotted, it is removed first
+// — otherwise the user would end up with two copies. OpModify
+// restores walk the snapshot back to rec.Path; the live bytes there
+// (the post-mv content) get clobbered after a sha256 mismatch check
+// — same conflict-guard logic as OpDelete.
 func (s *Snapshotter) Restore(rec Affected) error {
+	if rec.Op == OpRename {
+		return s.restoreRename(rec)
+	}
+	if rec.Op == OpModify {
+		// Modification snapshots carry pre-modification bytes and
+		// put them back at rec.Path. The conflict guard inside
+		// restoreFile is intentionally bypassed here: the live bytes
+		// at rec.Path are EXPECTED to differ from the snapshot
+		// (that's the modification we're undoing). The caller has
+		// asked for the rollback explicitly.
+		return s.restoreFileForceful(rec)
+	}
 	if rec.Op != OpDelete {
 		return fmt.Errorf("history: Restore: cannot restore op=%s", rec.Op)
 	}
@@ -172,8 +280,35 @@ func (s *Snapshotter) Restore(rec Affected) error {
 		// rely on it being there.
 		return os.MkdirAll(rec.Path, 0o755)
 	}
+	return s.restoreFile(rec)
+}
+
+// restoreFile is the shared body for OpDelete restores: copy the
+// snapshotted bytes back to rec.Path with the SHA256 verification +
+// conflict-guard rules. The conflict guard refuses to clobber a path
+// whose current bytes differ from rec.SHA256 — this is the right
+// posture for OpDelete (the path was supposed to be gone; any
+// content is the user actively reusing the path).
+func (s *Snapshotter) restoreFile(rec Affected) error {
+	return s.restoreFileImpl(rec, false)
+}
+
+// restoreFileForceful is the OpModify / OpRename-target variant. The
+// caller has explicitly asked to roll back a modification, so the
+// "live bytes differ from snapshot" case is EXPECTED, not a conflict
+// — the guard is skipped. SHA256-rot detection on the snapshot
+// itself is still applied so a corrupted snapshot cannot silently
+// damage live data.
+func (s *Snapshotter) restoreFileForceful(rec Affected) error {
+	return s.restoreFileImpl(rec, true)
+}
+
+// restoreFileImpl is the shared body parameterized by forceClobber.
+func (s *Snapshotter) restoreFileImpl(rec Affected, forceClobber bool) error {
+	if rec.SnapshotDir == "" {
+		return fmt.Errorf("history: Restore: %s missing snapshot_dir", rec.Path)
+	}
 	src := filepath.Join(rec.SnapshotDir, filepath.Base(rec.Path))
-	// Verify snapshot integrity before touching the live filesystem.
 	if rec.SHA256 != "" {
 		live, _, err := copyAndDigest(src, "")
 		if err != nil {
@@ -183,21 +318,59 @@ func (s *Snapshotter) Restore(rec Affected) error {
 			return fmt.Errorf("history: Restore: snapshot digest mismatch (rotted)")
 		}
 	}
-	// Conflict guard — if the path exists with different bytes,
-	// refuse rather than clobber.
-	if _, err := os.Stat(rec.Path); err == nil {
-		liveSum, _, err := copyAndDigest(rec.Path, "")
-		if err == nil && liveSum != rec.SHA256 {
-			return fmt.Errorf("history: Restore: %s exists with different bytes", rec.Path)
+	if !forceClobber {
+		if _, err := os.Stat(rec.Path); err == nil {
+			liveSum, _, err := copyAndDigest(rec.Path, "")
+			if err == nil && liveSum != rec.SHA256 {
+				return fmt.Errorf("history: Restore: %s exists with different bytes", rec.Path)
+			}
 		}
 	}
-	// Ensure parent dir exists (covers `rm -rf dir/file` where dir
-	// is also gone).
 	if err := os.MkdirAll(filepath.Dir(rec.Path), 0o755); err != nil {
 		return fmt.Errorf("history: Restore: mkdir parent: %w", err)
 	}
 	if _, _, err := copyAndDigest(src, rec.Path); err != nil {
 		return fmt.Errorf("history: Restore: copy back: %w", err)
+	}
+	return nil
+}
+
+// restoreRename undoes a `mv SRC DST` by putting the snapshotted bytes
+// back at SRC (rec.Path) and clearing DST when its content matches
+// what we put there. If DST has been further modified after the mv,
+// it stays in place — the modify chain restore would put its prior
+// version back.
+//
+// The directory-marker case (Op=OpRename with empty SnapshotDir) is
+// handled by MkdirAll on rec.Path, mirroring OpDelete's marker
+// behavior.
+func (s *Snapshotter) restoreRename(rec Affected) error {
+	if rec.SnapshotDir == "" {
+		// Directory rename marker: ensure rec.Path exists. The
+		// children carried by sibling rows will re-populate it.
+		if err := os.MkdirAll(rec.Path, 0o755); err != nil {
+			return fmt.Errorf("history: Restore: mkdir rename src: %w", err)
+		}
+		// Best-effort: remove the post-rename target if it is now an
+		// empty directory.
+		if rec.RenameTarget != "" {
+			_ = os.Remove(rec.RenameTarget)
+		}
+		return nil
+	}
+	if err := s.restoreFile(rec); err != nil {
+		return err
+	}
+	// Tidy: if the post-rename target still holds the exact bytes we
+	// just put back at rec.Path, the user has effectively two copies
+	// — keep the restored source, remove the duplicate target.
+	if rec.RenameTarget != "" && rec.SHA256 != "" {
+		if _, err := os.Stat(rec.RenameTarget); err == nil {
+			liveSum, _, err := copyAndDigest(rec.RenameTarget, "")
+			if err == nil && liveSum == rec.SHA256 {
+				_ = os.Remove(rec.RenameTarget)
+			}
+		}
 	}
 	return nil
 }

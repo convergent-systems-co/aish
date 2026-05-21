@@ -103,9 +103,23 @@ func (h *History) Before(pl *parser.Pipeline, line string) error {
 		h.pending = ""
 		return nil
 	}
-	paths := TargetPaths(*pl)
-	canon := h.canonicalize(paths)
-	recs, _ := h.sn.SnapshotMany(canon)
+
+	// v0.3-4: mv pipelines run through the rename snapshot path so a
+	// later restore can put DST bytes back AND undo the rename. A
+	// pipeline with both mv and a destructive verb (rare) goes
+	// through both branches — mv pairs first, then the generic path
+	// covers any other destructive stages.
+	var recs []Affected
+	for _, pair := range RenameTargets(*pl) {
+		canon := h.canonicalize([]string{pair[0], pair[1]})
+		recs = append(recs, h.sn.SnapshotMove(canon[0], canon[1])...)
+	}
+	if !pipelineHasMv(pl) {
+		paths := TargetPaths(*pl)
+		canon := h.canonicalize(paths)
+		moreRecs, _ := h.sn.SnapshotMany(canon)
+		recs = append(recs, moreRecs...)
+	}
 
 	for _, r := range recs {
 		if r.Op == OpSkipped {
@@ -247,16 +261,43 @@ func (h *History) notify(format string, args ...interface{}) {
 // splitDirsAndFiles partitions an affected list into directory
 // markers (SnapshotDir == "") and file snapshots. Used by
 // RestoreEvent so dirs are recreated before their child files.
+//
+// v0.3-4: OpRename and OpModify rows are treated as files for the
+// purposes of this partition — they always carry SnapshotDir,
+// because the directory-marker case is the empty-SnapshotDir OpRename
+// row produced by SnapshotMove's directory branch.
 func splitDirsAndFiles(affected []Affected) (dirs, files []Affected) {
 	for _, a := range affected {
-		if a.Op != OpDelete {
-			continue
-		}
-		if a.SnapshotDir == "" {
-			dirs = append(dirs, a)
-		} else {
-			files = append(files, a)
+		switch a.Op {
+		case OpDelete, OpRename:
+			if a.SnapshotDir == "" {
+				dirs = append(dirs, a)
+			} else {
+				files = append(files, a)
+			}
+		case OpModify:
+			// Modification snapshots always have bytes; never markers.
+			if a.SnapshotDir != "" {
+				files = append(files, a)
+			}
 		}
 	}
 	return dirs, files
+}
+
+// pipelineHasMv returns true when any command in the pipeline is mv.
+// Used by Before so a `mv` pipeline is processed exclusively through
+// SnapshotMove (which understands rename semantics) and never falls
+// through to the generic SnapshotMany path (which would treat src as
+// a deletion target).
+func pipelineHasMv(pl *parser.Pipeline) bool {
+	if pl == nil {
+		return false
+	}
+	for _, c := range pl.Commands {
+		if c.Name == "mv" {
+			return true
+		}
+	}
+	return false
 }
